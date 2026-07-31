@@ -1,0 +1,112 @@
+name: Build A1in AstrBot Release Image
+
+on:
+  push:
+    tags:
+      - "a1in-v*"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: a1in-release-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'A1in-SY/AstrBot'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate release metadata
+        id: metadata
+        shell: bash
+        run: |
+          release_tag="${GITHUB_REF_NAME}"
+          if [[ ! "$release_tag" =~ ^a1in-v([0-9]+\.[0-9]+\.[0-9]+)\.([0-9]+)$ ]]; then
+            echo "Expected tag format a1in-v<major>.<minor>.<patch>.<revision>; got: $release_tag" >&2
+            exit 1
+          fi
+
+          upstream_base_tag="v${BASH_REMATCH[1]}"
+          release_revision="${BASH_REMATCH[2]}"
+          image_tag="${upstream_base_tag}-a1in.${release_revision}"
+          if ! git rev-parse --verify --quiet "${upstream_base_tag}^{commit}" >/dev/null; then
+            echo "Missing declared upstream base tag: $upstream_base_tag" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$upstream_base_tag" HEAD; then
+            echo "Release commit does not descend from $upstream_base_tag" >&2
+            exit 1
+          fi
+          revision="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=12 HEAD)"
+
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "upstream_base_tag=$upstream_base_tag" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6.0.9
+        with:
+          version: 10.28.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.13.0'
+          cache: pnpm
+          cache-dependency-path: dashboard/pnpm-lock.yaml
+
+      - name: Build dashboard
+        shell: bash
+        working-directory: dashboard
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+          mkdir -p dist/assets
+          echo "${{ steps.metadata.outputs.release_tag }}" > dist/assets/version
+
+      - name: Bundle dashboard assets
+        shell: bash
+        run: |
+          rm -rf astrbot/dashboard/dist
+          mkdir -p astrbot/dashboard/dist
+          cp -R dashboard/dist/. astrbot/dashboard/dist/
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.2.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push release image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/a1in-sy/astrbot:${{ steps.metadata.outputs.image_tag }}
+            ghcr.io/a1in-sy/astrbot:sha-${{ steps.metadata.outputs.short_sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/A1in-SY/AstrBot
+            org.opencontainers.image.revision=${{ steps.metadata.outputs.revision }}
+            org.opencontainers.image.ref.name=${{ steps.metadata.outputs.release_tag }}
+            org.opencontainers.image.version=${{ steps.metadata.outputs.image_tag }}
+            io.a1in.astrbot.upstream-base=${{ steps.metadata.outputs.upstream_base_tag }}

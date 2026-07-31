@@ -140,6 +140,50 @@ llm_resp = await self.context.tool_loop_agent(
 
 `tool_loop_agent()` 方法会自动处理工具调用和大模型请求的循环，直到大模型不再调用工具或者达到最大步骤数为止。
 
+### 观测 Agent 的 LLM 调用
+
+本自维护 Core 为 `tool_loop_agent()` 发出的每一次逻辑上的 Agent→Provider 请求提供了能力门控的生命周期 API：
+
+```py
+from astrbot.core.agent.hooks import (
+    AGENT_LLM_HOOKS_API_VERSION,
+    AgentLLMCallRequestInfo,
+    AgentLLMCallResult,
+    BaseAgentRunHooks,
+)
+
+
+class TraceHooks(BaseAgentRunHooks):
+    async def on_llm_start(self, run_context, round_index: int) -> None:
+        print(f"LLM round {round_index} started")
+
+    async def on_llm_end(
+        self,
+        run_context,
+        round_index: int,
+        result: AgentLLMCallResult,
+    ) -> None:
+        request_info: AgentLLMCallRequestInfo | None = result.request_info
+        print(round_index, request_info, result.elapsed_seconds, result.cancelled)
+
+
+if AGENT_LLM_HOOKS_API_VERSION >= 1:
+    llm_resp = await self.context.tool_loop_agent(
+        event=event,
+        chat_provider_id=prov_id,
+        prompt="总结这段对话。",
+        agent_hooks=TraceHooks(),
+    )
+```
+
+每次 Agent run 的 `round_index` 从 `1` 开始，表示 Runner 可见的逻辑请求。它包含主请求、Runner 层的空输出重试、fallback Provider 请求、`skills_like` re-query、repair re-query，以及内置的 LLM 上下文摘要。Provider 自己的 HTTP 重试仍聚合为同一轮。
+
+无论正常完成、报错、流关闭还是取消，每个已开始的请求都会恰好触发一次 `on_llm_end()`。`elapsed_seconds` 使用 Core 的单调时钟测量。`response` 与 `exception` 保留 Provider 原始对象，hook 实现应只读使用它们，并避免不必要地长期保存含敏感内容的 prompt 或 response。对于最终响应，end hook 会在 Runner 解析响应或开始工具执行之前调用。
+
+API v1 还通过 `result.request_info` 提供该次实际 dispatch 的 `call_kind`、实际 `provider_id`、Core 选定的 `request_model` 和 `latest_user_text`。调用类型固定为 `main`、`fallback`、`skills_like_requery`、`skills_like_repair` 或 `context_compression`。`request_model` 表示调用 Provider adapter 前 Core 选定的模型，不声称是第三方服务最终路由的模型。`latest_user_text` 只包含最终发送给 Provider 的最后一条 `role="user"` 消息中的 text 内容；它不包含 `role="system"`、assistant/tool 消息、thinking 内容、工具 payload、图片或音频 URL，也不包含框架通过 `extra_user_content_parts` 注入的内容。它只是在内存中传给 hook 的 metadata；任何将其持久化或展示的 hook 都必须自行落实授权、脱敏和留存策略。该字段是可选的，因此原有四字段构造 `AgentLLMCallResult` 的代码仍兼容；hook 应显式处理 `None`。
+
+此能力只覆盖 `ToolLoopAgentRunner` 中对原生 Provider 的调用，不覆盖 `llm_generate()` 或其他 Agent Runner。官方上游 `v4.26.8` 本身不代表具有该 API，因此插件必须检查 `AGENT_LLM_HOOKS_API_VERSION >= 1`，不能只检查 AstrBot 版本号。
+
 ## Multi-Agent
 
 > [!TIP]

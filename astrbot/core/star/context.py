@@ -242,7 +242,9 @@ class Context:
             max_steps: Maximum number of tool calls before stopping the loop
             **kwargs: Additional keyword arguments. The kwargs will not be passed to the LLM directly for now, but can include:
                 stream: bool - whether to stream the LLM response
-                agent_hooks: BaseAgentRunHooks[AstrAgentContext] - hooks to run during agent execution
+                agent_hooks: BaseAgentRunHooks[AstrAgentContext] - hooks to run during agent execution.
+                    This self-maintained Core exposes per-request LLM hooks when
+                    AGENT_LLM_HOOKS_API_VERSION is at least 1.
                 agent_context: AstrAgentContext - context to use for the agent
 
                 other kwargs will be DIRECTLY passed to the runner.reset() method

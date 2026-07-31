@@ -142,6 +142,50 @@ llm_resp = await self.context.tool_loop_agent(
 
 `tool_loop_agent()` method automatically handles the loop of tool invocations and LLM requests until the model stops calling tools or the maximum number of steps is reached.
 
+### Observing Agent LLM Calls
+
+This self-maintained Core exposes a capability-gated lifecycle API for every logical Agent-to-Provider request made by `tool_loop_agent()`:
+
+```py
+from astrbot.core.agent.hooks import (
+    AGENT_LLM_HOOKS_API_VERSION,
+    AgentLLMCallRequestInfo,
+    AgentLLMCallResult,
+    BaseAgentRunHooks,
+)
+
+
+class TraceHooks(BaseAgentRunHooks):
+    async def on_llm_start(self, run_context, round_index: int) -> None:
+        print(f"LLM round {round_index} started")
+
+    async def on_llm_end(
+        self,
+        run_context,
+        round_index: int,
+        result: AgentLLMCallResult,
+    ) -> None:
+        request_info: AgentLLMCallRequestInfo | None = result.request_info
+        print(round_index, request_info, result.elapsed_seconds, result.cancelled)
+
+
+if AGENT_LLM_HOOKS_API_VERSION >= 1:
+    llm_resp = await self.context.tool_loop_agent(
+        event=event,
+        chat_provider_id=prov_id,
+        prompt="Summarize this conversation.",
+        agent_hooks=TraceHooks(),
+    )
+```
+
+`round_index` starts at `1` for each agent run and counts logical requests visible to the runner. It includes main requests, runner-level empty-output retries, fallback-provider requests, `skills_like` re-queries, repair re-queries, and built-in LLM context summaries. A Provider's own HTTP retries remain one logical round.
+
+`on_llm_end()` is called once for every started request, including normal completion, errors, stream closure, and cancellation. `elapsed_seconds` uses the Core monotonic clock. `response` and `exception` are the original provider objects, so hook implementations must treat them as read-only and avoid retaining sensitive prompts or responses unnecessarily. For a final response, the end hook runs before the runner parses the response or starts tool execution.
+
+API v1 also provides `result.request_info` for the exact dispatch: `call_kind`, the actual `provider_id`, the Core-selected `request_model`, and `latest_user_text`. The call kind is one of `main`, `fallback`, `skills_like_requery`, `skills_like_repair`, or `context_compression`. `request_model` describes the model selected before the Provider adapter is called; it does not claim to be a third-party service's final routing decision. `latest_user_text` is only the text content of the final `role="user"` message sent to the Provider. It excludes `role="system"`, assistant/tool messages, thinking content, tool payloads, image/audio URLs, and framework-injected `extra_user_content_parts`. It is in-memory hook metadata only. A hook that persists or displays it is responsible for applying its own authorization, redaction, and retention policy. The field is optional so existing code that constructs `AgentLLMCallResult` with its original four fields remains compatible; hooks should handle `None` explicitly.
+
+This capability applies only to native Provider calls in `ToolLoopAgentRunner`; it does not cover `llm_generate()` or other agent runner implementations. Upstream `v4.26.8` alone does not imply this API is present, so plugins must check `AGENT_LLM_HOOKS_API_VERSION >= 1` rather than checking only the AstrBot version.
+
 ## Multi-Agent
 
 > [!TIP]

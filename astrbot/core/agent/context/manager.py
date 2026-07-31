@@ -1,3 +1,6 @@
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
+
 from astrbot import logger
 
 from ..message import Message
@@ -6,6 +9,10 @@ from .config import ContextConfig
 from .token_counter import EstimateTokenCounter
 from .truncator import ContextTruncator
 
+if TYPE_CHECKING:
+    from astrbot.core.agent.hooks import AgentLLMCallRequestInfo
+    from astrbot.core.provider.entities import LLMResponse
+
 
 class ContextManager:
     """Context compression manager."""
@@ -13,6 +20,14 @@ class ContextManager:
     def __init__(
         self,
         config: ContextConfig,
+        llm_request_executor: Callable[
+            [
+                Callable[[], Awaitable["LLMResponse"]],
+                "AgentLLMCallRequestInfo",
+            ],
+            Awaitable["LLMResponse"],
+        ]
+        | None = None,
     ) -> None:
         """Initialize the context manager.
 
@@ -22,6 +37,8 @@ class ContextManager:
 
         Args:
             config: The context configuration.
+            llm_request_executor: Optional metadata-aware wrapper for LLM summary
+                requests.
         """
         self.config = config
 
@@ -36,6 +53,7 @@ class ContextManager:
                 keep_recent_ratio=config.llm_compress_keep_recent_ratio,
                 instruction_text=config.llm_compress_instruction,
                 token_counter=self.token_counter,
+                llm_request_executor=llm_request_executor,
             )
         else:
             self.compressor = TruncateByTurnsCompressor(

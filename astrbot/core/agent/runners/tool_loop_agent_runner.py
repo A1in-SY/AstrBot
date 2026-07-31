@@ -5,7 +5,7 @@ import time
 import traceback
 import typing as T
 import uuid
-from contextlib import suppress
+from contextlib import aclosing, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -51,7 +51,12 @@ from ..context.compressor import ContextCompressor
 from ..context.config import ContextConfig
 from ..context.manager import ContextManager
 from ..context.token_counter import EstimateTokenCounter, TokenCounter
-from ..hooks import BaseAgentRunHooks
+from ..hooks import (
+    AgentLLMCallRequestInfo,
+    AgentLLMCallResult,
+    BaseAgentRunHooks,
+    _build_agent_llm_call_request_info,
+)
 from ..message import (
     AssistantMessageSegment,
     Message,
@@ -245,6 +250,11 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         self.tool_result_overflow_dir = tool_result_overflow_dir
         self.read_tool = read_tool
         self._tool_result_token_counter = EstimateTokenCounter()
+        self.provider = provider
+        self._primary_provider = provider
+        self.agent_hooks = agent_hooks
+        self.run_context = run_context
+        self._llm_round_index = 0
         self.request_context_manager_config = ContextConfig(
             # <=0 disables token-based guarding.
             max_context_tokens=provider.provider_config.get("max_context_tokens", 0),
@@ -258,10 +268,10 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             custom_compressor=self.custom_compressor,
         )
         self.request_context_manager = ContextManager(
-            self.request_context_manager_config
+            self.request_context_manager_config,
+            llm_request_executor=self._call_llm,
         )
 
-        self.provider = provider
         self.fallback_providers: list[Provider] = []
         seen_provider_ids: set[str] = {str(provider.provider_config.get("id", ""))}
         for fallback_provider in fallback_providers or []:
@@ -276,8 +286,6 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         self.final_llm_resp = None
         self._state = AgentState.IDLE
         self.tool_executor = tool_executor
-        self.agent_hooks = agent_hooks
-        self.run_context = run_context
         self._aborted = False
         self._abort_signal = asyncio.Event()
         self._pending_follow_ups: list[FollowUpTicket] = []
@@ -459,10 +467,121 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             preview = preview[:next_len]
         return preview
 
+    def _extra_user_text_parts_for_llm_metadata(self) -> list[str]:
+        """Return text blocks injected through ProviderRequest extra content.
+
+        These blocks may represent system notices or other framework-injected
+        instructions even though the Provider accepts them in a user-role
+        message. Lifecycle metadata must not expose them as user input.
+
+        Returns:
+            Text blocks that must be excluded from ``latest_user_text``.
+        """
+        text_parts: list[str] = []
+        for part in self.req.extra_user_content_parts:
+            if isinstance(part, TextPart):
+                text_parts.append(part.text)
+            elif isinstance(part, dict):
+                text = part.get("text") if part.get("type") == "text" else None
+                if isinstance(text, str):
+                    text_parts.append(text)
+        return text_parts
+
+    async def _start_llm_call(self) -> tuple[int, int]:
+        """Notify hooks and start timing one logical Agent-to-Provider LLM call.
+
+        Returns:
+            The monotonically increasing round index and its start timestamp in
+            nanoseconds from ``time.perf_counter_ns()``.
+        """
+        self._llm_round_index += 1
+        round_index = self._llm_round_index
+        try:
+            await self.agent_hooks.on_llm_start(self.run_context, round_index)
+        except Exception as exc:
+            logger.error("Error in on_llm_start hook: %s", exc, exc_info=True)
+        return round_index, time.perf_counter_ns()
+
+    async def _end_llm_call(
+        self,
+        round_index: int,
+        started_at_ns: int,
+        response: LLMResponse | None,
+        exception: BaseException | None,
+        request_info: AgentLLMCallRequestInfo | None,
+    ) -> None:
+        """Notify hooks that one logical Agent-to-Provider LLM call has ended.
+
+        Args:
+            round_index: The logical request number within the current agent run.
+            started_at_ns: Start timestamp from ``time.perf_counter_ns()``.
+            response: Original provider response, if the request returned normally.
+            exception: Original exception, if the request did not return normally.
+            request_info: Safe metadata captured from the provider dispatch.
+        """
+        elapsed_seconds = max(0, time.perf_counter_ns() - started_at_ns) / 1_000_000_000
+        result = AgentLLMCallResult(
+            elapsed_seconds=elapsed_seconds,
+            response=response,
+            exception=exception,
+            cancelled=self._is_stop_requested()
+            or isinstance(exception, (asyncio.CancelledError, GeneratorExit)),
+            request_info=request_info,
+        )
+        try:
+            await self.agent_hooks.on_llm_end(self.run_context, round_index, result)
+        except Exception as exc:
+            logger.error("Error in on_llm_end hook: %s", exc, exc_info=True)
+
+    async def _call_llm(
+        self,
+        call: T.Callable[[], T.Awaitable[LLMResponse]],
+        request_info: AgentLLMCallRequestInfo | None = None,
+    ) -> LLMResponse:
+        """Run one non-streaming logical Agent-to-Provider LLM request.
+
+        Args:
+            call: Deferred provider request to execute.
+            request_info: Safe metadata captured from the provider dispatch.
+
+        Returns:
+            The original provider response.
+
+        Raises:
+            BaseException: Re-raises the original provider exception after hooks run.
+        """
+        round_index, started_at_ns = await self._start_llm_call()
+        response: LLMResponse | None = None
+        exception: BaseException | None = None
+        try:
+            response = await call()
+            return response
+        except BaseException as exc:
+            exception = exc
+            raise
+        finally:
+            await self._end_llm_call(
+                round_index,
+                started_at_ns,
+                response,
+                exception,
+                request_info,
+            )
+
     async def _iter_llm_responses(
-        self, *, include_model: bool = True
+        self,
+        *,
+        include_model: bool = True,
+        call_kind: T.Literal[
+            "main",
+            "fallback",
+            "skills_like_requery",
+            "skills_like_repair",
+            "context_compression",
+        ] = "main",
     ) -> T.AsyncGenerator[LLMResponse, None]:
         """Yields chunks *and* a final LLMResponse."""
+        provider = self.provider
         payload = {
             "contexts": self._sanitize_contexts_for_provider(self.run_context.messages),
             "func_tool": self._func_tool_for_provider(),
@@ -474,12 +593,45 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         if include_model:
             # For primary provider we keep explicit model selection if provided.
             payload["model"] = self.req.model
-        if self.streaming:
-            stream = self.provider.text_chat_stream(**payload)
-            async for resp in stream:  # type: ignore
-                yield resp
-        else:
-            yield await self.provider.text_chat(**payload)
+        request_info = _build_agent_llm_call_request_info(
+            call_kind=call_kind,
+            provider=provider,
+            contexts=payload["contexts"],
+            explicit_model=payload.get("model"),
+            excluded_user_text_parts=self._extra_user_text_parts_for_llm_metadata(),
+        )
+        if not self.streaming:
+            yield await self._call_llm(
+                lambda: provider.text_chat(**payload),
+                request_info,
+            )
+            return
+
+        round_index, started_at_ns = await self._start_llm_call()
+        response: LLMResponse | None = None
+        exception: BaseException | None = None
+        try:
+            async with aclosing(provider.text_chat_stream(**payload)) as stream:
+                async for resp in stream:
+                    if resp.is_chunk:
+                        yield resp
+                        continue
+                    response = resp
+                    break
+        except BaseException as exc:
+            exception = exc
+            raise
+        finally:
+            await self._end_llm_call(
+                round_index,
+                started_at_ns,
+                response,
+                exception,
+                request_info,
+            )
+
+        if response is not None:
+            yield response
 
     async def _iter_llm_responses_with_fallback(
         self,
@@ -500,6 +652,9 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                     candidate_id,
                 )
             self.provider = candidate
+            call_kind: T.Literal["main", "fallback"] = (
+                "main" if candidate is self._primary_provider else "fallback"
+            )
             try:
                 retrying = AsyncRetrying(
                     retry=retry_if_exception_type(EmptyModelOutputError),
@@ -516,32 +671,37 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                     has_stream_output = False
                     with attempt:
                         try:
-                            async for resp in self._iter_llm_responses(
-                                include_model=idx == 0
-                            ):
-                                if resp.is_chunk:
-                                    has_stream_output = True
+                            llm_responses = self._iter_llm_responses(
+                                include_model=idx == 0,
+                                call_kind=call_kind,
+                            )
+                            try:
+                                async for resp in llm_responses:
+                                    if resp.is_chunk:
+                                        has_stream_output = True
+                                        yield resp
+                                        continue
+
+                                    if (
+                                        resp.role == "err"
+                                        and not has_stream_output
+                                        and (not is_last_candidate)
+                                    ):
+                                        last_err_response = resp
+                                        logger.warning(
+                                            "Chat Model %s returns error response, trying fallback to next provider.",
+                                            candidate_id,
+                                        )
+                                        break
+
+                                    self._sanitize_malformed_tool_calls(resp)
                                     yield resp
-                                    continue
+                                    return
 
-                                if (
-                                    resp.role == "err"
-                                    and not has_stream_output
-                                    and (not is_last_candidate)
-                                ):
-                                    last_err_response = resp
-                                    logger.warning(
-                                        "Chat Model %s returns error response, trying fallback to next provider.",
-                                        candidate_id,
-                                    )
-                                    break
-
-                                self._sanitize_malformed_tool_calls(resp)
-                                yield resp
-                                return
-
-                            if has_stream_output:
-                                return
+                                if has_stream_output:
+                                    return
+                            finally:
+                                await llm_responses.aclose()
                         except EmptyModelOutputError:
                             if has_stream_output:
                                 logger.warning(
@@ -754,63 +914,71 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         )
         self._simple_print_message_role("[AftCompact]", self.run_context.messages)
 
-        async for llm_response in self._iter_llm_responses_with_fallback():
-            if llm_response.is_chunk:
-                if self.stats.time_to_first_token == 0:
-                    self.stats.time_to_first_token = time.time() - self.stats.start_time
+        llm_responses = self._iter_llm_responses_with_fallback()
+        try:
+            async for llm_response in llm_responses:
+                if llm_response.is_chunk:
+                    if self.stats.time_to_first_token == 0:
+                        self.stats.time_to_first_token = (
+                            time.time() - self.stats.start_time
+                        )
 
-                if llm_response.reasoning_content:
-                    yield AgentResponse(
-                        type="streaming_delta",
-                        data=AgentResponseData(
-                            chain=MessageChain(type="reasoning").message(
-                                llm_response.reasoning_content,
+                    if llm_response.reasoning_content:
+                        yield AgentResponse(
+                            type="streaming_delta",
+                            data=AgentResponseData(
+                                chain=MessageChain(type="reasoning").message(
+                                    llm_response.reasoning_content,
+                                ),
                             ),
-                        ),
-                    )
-                if llm_response.result_chain:
-                    yield AgentResponse(
-                        type="streaming_delta",
-                        data=AgentResponseData(chain=llm_response.result_chain),
-                    )
-                elif llm_response.completion_text:
-                    yield AgentResponse(
-                        type="streaming_delta",
-                        data=AgentResponseData(
-                            chain=MessageChain().message(llm_response.completion_text),
-                        ),
-                    )
-                if self._is_stop_requested():
-                    llm_resp_result = LLMResponse(
-                        role="assistant",
-                        completion_text=self.USER_INTERRUPTION_MESSAGE,
-                        reasoning_content=llm_response.reasoning_content,
-                        reasoning_signature=llm_response.reasoning_signature,
-                    )
-                    break
-                continue
-            llm_resp_result = llm_response
+                        )
+                    if llm_response.result_chain:
+                        yield AgentResponse(
+                            type="streaming_delta",
+                            data=AgentResponseData(chain=llm_response.result_chain),
+                        )
+                    elif llm_response.completion_text:
+                        yield AgentResponse(
+                            type="streaming_delta",
+                            data=AgentResponseData(
+                                chain=MessageChain().message(
+                                    llm_response.completion_text
+                                ),
+                            ),
+                        )
+                    if self._is_stop_requested():
+                        llm_resp_result = LLMResponse(
+                            role="assistant",
+                            completion_text=self.USER_INTERRUPTION_MESSAGE,
+                            reasoning_content=llm_response.reasoning_content,
+                            reasoning_signature=llm_response.reasoning_signature,
+                        )
+                        break
+                    continue
+                llm_resp_result = llm_response
 
-            # Chunk responses have already continued above. A missing usage report
-            # means the latest context occupancy is unknown.
-            self.stats.current_context_tokens = 0
-            if llm_response.usage:
-                # Keep cumulative usage for billing and expose the latest request
-                # input separately for context-window occupancy displays.
-                self.stats.token_usage += llm_response.usage
-                self.stats.current_context_tokens = llm_response.usage.input
-                if self.req.conversation:
-                    self.req.conversation.token_usage = llm_response.usage.total
-            yield AgentResponse(
-                type="agent_stats",
-                data=AgentResponseData(
-                    chain=MessageChain(
-                        type="agent_stats",
-                        chain=[Json(data=self.stats.to_dict())],
-                    )
-                ),
-            )
-            break  # got final response
+                # Chunk responses have already continued above. A missing usage report
+                # means the latest context occupancy is unknown.
+                self.stats.current_context_tokens = 0
+                if llm_response.usage:
+                    # Keep cumulative usage for billing and expose the latest request
+                    # input separately for context-window occupancy displays.
+                    self.stats.token_usage += llm_response.usage
+                    self.stats.current_context_tokens = llm_response.usage.input
+                    if self.req.conversation:
+                        self.req.conversation.token_usage = llm_response.usage.total
+                yield AgentResponse(
+                    type="agent_stats",
+                    data=AgentResponseData(
+                        chain=MessageChain(
+                            type="agent_stats",
+                            chain=[Json(data=self.stats.to_dict())],
+                        )
+                    ),
+                )
+                break  # got final response
+        finally:
+            await llm_responses.aclose()
 
         if not llm_resp_result:
             if self._is_stop_requested():
@@ -1356,15 +1524,27 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             )
             if param_subset.tools and tool_names:
                 contexts = self._build_tool_requery_context(tool_names)
-                requery_resp = await self.provider.text_chat(
-                    contexts=self._sanitize_contexts_for_provider(contexts),
-                    func_tool=param_subset,
-                    model=self.req.model,
-                    session_id=self.req.session_id,
-                    extra_user_content_parts=self.req.extra_user_content_parts,
-                    # tool_choice="required",
-                    abort_signal=self._abort_signal,
-                    request_max_retries=self.request_max_retries,
+                provider = self.provider
+                sanitized_contexts = self._sanitize_contexts_for_provider(contexts)
+                request_info = _build_agent_llm_call_request_info(
+                    call_kind="skills_like_requery",
+                    provider=provider,
+                    contexts=sanitized_contexts,
+                    explicit_model=self.req.model,
+                    excluded_user_text_parts=self._extra_user_text_parts_for_llm_metadata(),
+                )
+                requery_resp = await self._call_llm(
+                    lambda: provider.text_chat(
+                        contexts=sanitized_contexts,
+                        func_tool=param_subset,
+                        model=self.req.model,
+                        session_id=self.req.session_id,
+                        extra_user_content_parts=self.req.extra_user_content_parts,
+                        # tool_choice="required",
+                        abort_signal=self._abort_signal,
+                        request_max_retries=self.request_max_retries,
+                    ),
+                    request_info,
                 )
                 if requery_resp:
                     llm_resp = requery_resp
@@ -1384,15 +1564,29 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                         tool_names,
                         extra_instruction=self.SKILLS_LIKE_REQUERY_REPAIR_INSTRUCTION,
                     )
-                    repair_resp = await self.provider.text_chat(
-                        contexts=self._sanitize_contexts_for_provider(repair_contexts),
-                        func_tool=param_subset,
-                        model=self.req.model,
-                        session_id=self.req.session_id,
-                        extra_user_content_parts=self.req.extra_user_content_parts,
-                        # tool_choice="required",
-                        abort_signal=self._abort_signal,
-                        request_max_retries=self.request_max_retries,
+                    provider = self.provider
+                    sanitized_repair_contexts = self._sanitize_contexts_for_provider(
+                        repair_contexts
+                    )
+                    request_info = _build_agent_llm_call_request_info(
+                        call_kind="skills_like_repair",
+                        provider=provider,
+                        contexts=sanitized_repair_contexts,
+                        explicit_model=self.req.model,
+                        excluded_user_text_parts=self._extra_user_text_parts_for_llm_metadata(),
+                    )
+                    repair_resp = await self._call_llm(
+                        lambda: provider.text_chat(
+                            contexts=sanitized_repair_contexts,
+                            func_tool=param_subset,
+                            model=self.req.model,
+                            session_id=self.req.session_id,
+                            extra_user_content_parts=self.req.extra_user_content_parts,
+                            # tool_choice="required",
+                            abort_signal=self._abort_signal,
+                            request_max_retries=self.request_max_retries,
+                        ),
+                        request_info,
                     )
                     if repair_resp:
                         llm_resp = repair_resp
