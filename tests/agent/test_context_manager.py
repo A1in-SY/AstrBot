@@ -85,6 +85,34 @@ class TestContextManager:
 
         assert isinstance(manager.compressor, LLMSummaryCompressor)
 
+    @pytest.mark.asyncio
+    async def test_llm_compressor_uses_request_executor(self):
+        """ContextManager routes built-in summary requests through its executor."""
+        provider = MockProvider()
+        request_calls = []
+
+        async def execute_request(request):
+            request_calls.append(request)
+            return await request()
+
+        manager = ContextManager(
+            ContextConfig(
+                llm_compress_provider=provider,  # type: ignore[arg-type]
+                max_context_tokens=1,
+            ),
+            llm_request_executor=execute_request,
+        )
+        messages = [
+            self.create_message("user", "Old user message " * 20),
+            self.create_message("assistant", "Old assistant message " * 20),
+            self.create_message("user", "Current request"),
+        ]
+
+        await manager.process(messages)
+
+        assert len(request_calls) == 1
+        assert provider.last_text_chat_kwargs is not None
+
     def test_init_with_truncate_compressor(self):
         """Test initialization with truncate-based compression (default)."""
         config = ContextConfig(truncate_turns=3)

@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ...provider.modalities import (
@@ -18,6 +19,7 @@ else:
         logger = logging.getLogger("astrbot")
 
 if TYPE_CHECKING:
+    from astrbot.core.provider.entities import LLMResponse
     from astrbot.core.provider.provider import Provider
 
 from ..context.truncator import ContextTruncator
@@ -130,6 +132,11 @@ class LLMSummaryCompressor:
         instruction_text: str | None = None,
         compression_threshold: float = 0.82,
         token_counter: TokenCounter | None = None,
+        llm_request_executor: Callable[
+            [Callable[[], Awaitable["LLMResponse"]]],
+            Awaitable["LLMResponse"],
+        ]
+        | None = None,
     ) -> None:
         """Initialize the LLM summary compressor.
 
@@ -139,11 +146,14 @@ class LLMSummaryCompressor:
                 exact context. Clamped to 0-0.3.
             instruction_text: Custom instruction for summary generation.
             compression_threshold: The compression trigger threshold (default: 0.82).
+            token_counter: Token counter used for context sizing.
+            llm_request_executor: Optional wrapper for the summary LLM request.
         """
         self.provider = provider
         self.keep_recent_ratio = min(max(float(keep_recent_ratio), 0.0), 0.3)
         self.compression_threshold = compression_threshold
         self.token_counter = token_counter or EstimateTokenCounter()
+        self.llm_request_executor = llm_request_executor
 
         self.instruction_text = instruction_text or (
             "Based on our full conversation history, produce a concise summary of key takeaways and/or project progress.\n"
@@ -273,9 +283,16 @@ class LLMSummaryCompressor:
 
         # Generate summary
         try:
-            response = await self.provider.text_chat(
-                contexts=sanitized_summary_contexts,
-            )
+
+            async def request() -> "LLMResponse":
+                return await self.provider.text_chat(
+                    contexts=sanitized_summary_contexts,
+                )
+
+            if self.llm_request_executor:
+                response = await self.llm_request_executor(request)
+            else:
+                response = await request()
             summary_content = (response.completion_text or "").strip()
         except Exception as e:
             logger.error(f"Failed to generate summary: {e}")

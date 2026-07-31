@@ -13,7 +13,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from astrbot.core.agent.agent import Agent
 from astrbot.core.agent.handoff import HandoffTool
-from astrbot.core.agent.hooks import BaseAgentRunHooks
+from astrbot.core.agent.hooks import (
+    AGENT_LLM_HOOKS_API_VERSION,
+    AgentLLMCallResult,
+    BaseAgentRunHooks,
+)
 from astrbot.core.agent.message import ImageURLPart, Message, TextPart
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
@@ -385,6 +389,24 @@ class MockHooks(BaseAgentRunHooks):
         self.agent_done_called = True
 
 
+class RecordingLLMHooks(BaseAgentRunHooks):
+    """Record LLM lifecycle hook calls for assertions."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, int, AgentLLMCallResult | None]] = []
+
+    async def on_llm_start(self, run_context, round_index: int) -> None:
+        self.events.append(("start", round_index, None))
+
+    async def on_llm_end(
+        self,
+        run_context,
+        round_index: int,
+        result: AgentLLMCallResult,
+    ) -> None:
+        self.events.append(("end", round_index, result))
+
+
 class MockEvent:
     def __init__(self, umo: str, sender_id: str):
         self.unified_msg_origin = umo
@@ -475,6 +497,174 @@ def runner():
 
 def _make_large_tool_result_text() -> str:
     return "x" * 100000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_llm_hooks_report_logical_round_and_core_duration(
+    runner,
+    mock_provider,
+    provider_request,
+    mock_tool_executor,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+):
+    """Each primary provider request emits a paired lifecycle result."""
+    assert AGENT_LLM_HOOKS_API_VERSION == 1
+    mock_provider.should_call_tools = False
+    hooks = RecordingLLMHooks()
+    timestamps = iter((100, 1_000_000_100))
+    monkeypatch.setattr(
+        "astrbot.core.agent.runners.tool_loop_agent_runner.time.perf_counter_ns",
+        lambda: next(timestamps),
+    )
+
+    await runner.reset(
+        provider=mock_provider,
+        request=provider_request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=mock_tool_executor,
+        agent_hooks=hooks,
+        streaming=streaming,
+    )
+
+    async for _ in runner.step_until_done(1):
+        pass
+
+    assert [(name, round_index) for name, round_index, _ in hooks.events] == [
+        ("start", 1),
+        ("end", 1),
+    ]
+    result = hooks.events[1][2]
+    assert result is not None
+    assert result.elapsed_seconds == pytest.approx(1.0)
+    assert result.response is not None
+    assert result.response.completion_text == "这是我的最终回答"
+    assert result.exception is None
+    assert result.cancelled is False
+
+
+@pytest.mark.asyncio
+async def test_llm_hooks_cover_runner_empty_output_retries(
+    runner,
+    provider_request,
+    mock_tool_executor,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Runner-visible empty-output retries are individual logical rounds."""
+    provider = MockEmptyOutputThenSuccessProvider(failures_before_success=1)
+    hooks = RecordingLLMHooks()
+    monkeypatch.setattr(runner, "EMPTY_OUTPUT_RETRY_WAIT_MIN_S", 0)
+    monkeypatch.setattr(runner, "EMPTY_OUTPUT_RETRY_WAIT_MAX_S", 0)
+
+    await runner.reset(
+        provider=provider,
+        request=provider_request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=mock_tool_executor,
+        agent_hooks=hooks,
+        streaming=False,
+    )
+
+    async for _ in runner.step_until_done(1):
+        pass
+
+    assert [(name, round_index) for name, round_index, _ in hooks.events] == [
+        ("start", 1),
+        ("end", 1),
+        ("start", 2),
+        ("end", 2),
+    ]
+    first_result = hooks.events[1][2]
+    second_result = hooks.events[3][2]
+    assert first_result is not None
+    assert isinstance(first_result.exception, EmptyModelOutputError)
+    assert first_result.response is None
+    assert second_result is not None
+    assert second_result.exception is None
+    assert second_result.response is not None
+
+
+@pytest.mark.asyncio
+async def test_llm_hooks_cover_fallback_provider_calls(
+    runner,
+    provider_request,
+    mock_tool_executor,
+):
+    """A fallback provider request starts a new logical LLM round."""
+    primary_provider = MockFailingProvider()
+    fallback_provider = MockProvider()
+    fallback_provider.should_call_tools = False
+    hooks = RecordingLLMHooks()
+
+    await runner.reset(
+        provider=primary_provider,
+        request=provider_request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=mock_tool_executor,
+        agent_hooks=hooks,
+        streaming=False,
+        fallback_providers=[fallback_provider],
+    )
+
+    async for _ in runner.step_until_done(1):
+        pass
+
+    assert [(name, round_index) for name, round_index, _ in hooks.events] == [
+        ("start", 1),
+        ("end", 1),
+        ("start", 2),
+        ("end", 2),
+    ]
+    first_result = hooks.events[1][2]
+    second_result = hooks.events[3][2]
+    assert first_result is not None
+    assert isinstance(first_result.exception, RuntimeError)
+    assert second_result is not None
+    assert second_result.response is not None
+
+
+@pytest.mark.asyncio
+async def test_llm_hooks_cover_builtin_summary_compressor(
+    runner,
+    mock_tool_executor,
+):
+    """The built-in LLM summary request shares the runner lifecycle counter."""
+    provider = MockProvider()
+    provider.should_call_tools = False
+    provider.provider_config["max_context_tokens"] = 1
+    summary_provider = MockProvider()
+    summary_provider.should_call_tools = False
+    hooks = RecordingLLMHooks()
+    request = ProviderRequest(
+        prompt="Current request",
+        contexts=[
+            {"role": "user", "content": "Old user message " * 20},
+            {"role": "assistant", "content": "Old assistant message " * 20},
+        ],
+    )
+
+    await runner.reset(
+        provider=provider,
+        request=request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=mock_tool_executor,
+        agent_hooks=hooks,
+        streaming=False,
+        llm_compress_provider=summary_provider,
+    )
+
+    async for _ in runner.step_until_done(1):
+        pass
+
+    assert summary_provider.call_count == 1
+    assert provider.call_count == 1
+    assert [(name, round_index) for name, round_index, _ in hooks.events] == [
+        ("start", 1),
+        ("end", 1),
+        ("start", 2),
+        ("end", 2),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1278,16 +1468,17 @@ async def test_empty_output_retries_exhausted_then_uses_fallback_provider(
 
 @pytest.mark.asyncio
 async def test_stop_signal_returns_aborted_and_persists_partial_message(
-    runner, provider_request, mock_tool_executor, mock_hooks
+    runner, provider_request, mock_tool_executor
 ):
     provider = MockAbortableStreamProvider()
+    hooks = RecordingLLMHooks()
 
     await runner.reset(
         provider=provider,
         request=provider_request,
         run_context=ContextWrapper(context=None),
         tool_executor=mock_tool_executor,
-        agent_hooks=mock_hooks,
+        agent_hooks=hooks,
         streaming=True,
     )
 
@@ -1310,6 +1501,15 @@ async def test_stop_signal_returns_aborted_and_persists_partial_message(
     # When interrupted, the runner replaces completion_text with a system message
     assert "interrupted" in final_resp.completion_text.lower()
     assert runner.run_context.messages[-1].role == "assistant"
+    assert [(name, round_index) for name, round_index, _ in hooks.events] == [
+        ("start", 1),
+        ("end", 1),
+    ]
+    result = hooks.events[1][2]
+    assert result is not None
+    assert result.cancelled is True
+    assert result.response is None
+    assert isinstance(result.exception, GeneratorExit)
 
 
 @pytest.mark.asyncio
@@ -1543,13 +1743,14 @@ async def test_skills_like_requery_passes_extra_user_content_parts():
     ctx = MockAgentContext(event)
     run_context = ContextWrapper(context=ctx)
     runner = ToolLoopAgentRunner()
+    hooks = RecordingLLMHooks()
 
     await runner.reset(
         provider=provider,
         request=req,
         run_context=run_context,
         tool_executor=cast(Any, MockToolExecutor()),
-        agent_hooks=MockHooks(),
+        agent_hooks=hooks,
         tool_schema_mode="skills_like",
     )
 
@@ -1563,6 +1764,65 @@ async def test_skills_like_requery_passes_extra_user_content_parts():
     parts = captured_kwargs["extra_user_content_parts"]
     assert len(parts) == 1
     assert parts[0].text == "<image_caption>一张猫的照片</image_caption>"
+    assert [(name, round_index) for name, round_index, _ in hooks.events] == [
+        ("start", 1),
+        ("end", 1),
+        ("start", 2),
+        ("end", 2),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_llm_hooks_cover_skills_like_repair_requery(
+    runner,
+    provider_request,
+    mock_tool_executor,
+):
+    """The repair re-query is tracked as its own logical LLM round."""
+
+    class RepairProvider(MockProvider):
+        async def text_chat(self, **kwargs) -> LLMResponse:
+            self.call_count += 1
+            if self.call_count == 1:
+                return LLMResponse(
+                    role="assistant",
+                    tools_call_name=["test_tool"],
+                    tools_call_args=[{"query": "selected"}],
+                    tools_call_ids=["call_selected"],
+                )
+            if self.call_count == 2:
+                return LLMResponse(role="assistant", completion_text="")
+            return LLMResponse(
+                role="assistant",
+                tools_call_name=["test_tool"],
+                tools_call_args=[{"query": "repaired"}],
+                tools_call_ids=["call_repaired"],
+            )
+
+    provider = RepairProvider()
+    hooks = RecordingLLMHooks()
+
+    await runner.reset(
+        provider=provider,
+        request=provider_request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=mock_tool_executor,
+        agent_hooks=hooks,
+        streaming=False,
+        tool_schema_mode="skills_like",
+    )
+
+    async for _ in runner.step():
+        pass
+
+    assert [(name, round_index) for name, round_index, _ in hooks.events] == [
+        ("start", 1),
+        ("end", 1),
+        ("start", 2),
+        ("end", 2),
+        ("start", 3),
+        ("end", 3),
+    ]
 
 
 @pytest.mark.asyncio

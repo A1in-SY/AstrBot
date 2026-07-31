@@ -142,6 +142,46 @@ llm_resp = await self.context.tool_loop_agent(
 
 `tool_loop_agent()` method automatically handles the loop of tool invocations and LLM requests until the model stops calling tools or the maximum number of steps is reached.
 
+### Observing Agent LLM Calls
+
+This self-maintained Core exposes a capability-gated lifecycle API for every logical Agent-to-Provider request made by `tool_loop_agent()`:
+
+```py
+from astrbot.core.agent.hooks import (
+    AGENT_LLM_HOOKS_API_VERSION,
+    AgentLLMCallResult,
+    BaseAgentRunHooks,
+)
+
+
+class TraceHooks(BaseAgentRunHooks):
+    async def on_llm_start(self, run_context, round_index: int) -> None:
+        print(f"LLM round {round_index} started")
+
+    async def on_llm_end(
+        self,
+        run_context,
+        round_index: int,
+        result: AgentLLMCallResult,
+    ) -> None:
+        print(round_index, result.elapsed_seconds, result.cancelled)
+
+
+if AGENT_LLM_HOOKS_API_VERSION >= 1:
+    llm_resp = await self.context.tool_loop_agent(
+        event=event,
+        chat_provider_id=prov_id,
+        prompt="Summarize this conversation.",
+        agent_hooks=TraceHooks(),
+    )
+```
+
+`round_index` starts at `1` for each agent run and counts logical requests visible to the runner. It includes main requests, runner-level empty-output retries, fallback-provider requests, `skills_like` re-queries, repair re-queries, and built-in LLM context summaries. A Provider's own HTTP retries remain one logical round.
+
+`on_llm_end()` is called once for every started request, including normal completion, errors, stream closure, and cancellation. `elapsed_seconds` uses the Core monotonic clock. `response` and `exception` are the original provider objects, so hook implementations must treat them as read-only and avoid retaining sensitive prompts or responses unnecessarily. For a final response, the end hook runs before the runner parses the response or starts tool execution.
+
+This capability applies only to native Provider calls in `ToolLoopAgentRunner`; it does not cover `llm_generate()` or other agent runner implementations. Upstream `v4.26.8` alone does not imply this API is present, so plugins must check `AGENT_LLM_HOOKS_API_VERSION >= 1` rather than checking only the AstrBot version.
+
 ## Multi-Agent
 
 > [!TIP]
