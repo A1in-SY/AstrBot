@@ -16,8 +16,10 @@ import time
 import traceback
 from asyncio import Queue
 
+from astrbot.a1in_release import get_a1in_release_identity
 from astrbot.api import logger, sp
 from astrbot.core import LogBroker, LogManager
+from astrbot.core.agent.hooks import AGENT_LLM_HOOKS_API_VERSION
 from astrbot.core.astrbot_config_mgr import AstrBotConfigManager
 from astrbot.core.config.default import VERSION
 from astrbot.core.conversation_mgr import ConversationManager
@@ -160,6 +162,15 @@ class AstrBotCoreLifecycle:
         """
         # 初始化日志代理
         logger.info("AstrBot v" + VERSION)
+        a1in_identity = get_a1in_release_identity()
+        logger.info(
+            "A1in release %s (upstream base %s, source revision %s, "
+            "agent LLM hooks API v%s)",
+            a1in_identity["a1in_release"],
+            a1in_identity["a1in_upstream_base"],
+            a1in_identity["a1in_source_revision"] or "source-tree",
+            AGENT_LLM_HOOKS_API_VERSION,
+        )
         if os.environ.get("TESTING", ""):
             LogManager.configure_logger(
                 logger, self.astrbot_config, override_level="DEBUG"

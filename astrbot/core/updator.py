@@ -7,6 +7,7 @@ from pathlib import Path
 
 import psutil
 
+from astrbot.a1in_release import ensure_official_updates_enabled
 from astrbot.core import logger
 from astrbot.core.config.default import VERSION
 from astrbot.core.desktop_runtime import (
@@ -180,6 +181,7 @@ class AstrBotUpdator(RepoZipUpdator):
         consider_prerelease: bool = True,
     ) -> ReleaseInfo | None:
         """检查更新"""
+        ensure_official_updates_enabled()
         return await super().check_update(
             self.ASTRBOT_RELEASE_API,
             VERSION,
@@ -187,6 +189,7 @@ class AstrBotUpdator(RepoZipUpdator):
         )
 
     async def get_releases(self) -> list:
+        ensure_official_updates_enabled()
         return await self.fetch_release_info(self.ASTRBOT_RELEASE_API)
 
     async def update(
@@ -197,6 +200,7 @@ class AstrBotUpdator(RepoZipUpdator):
         proxy="",
         progress_callback=None,
     ) -> None:
+        ensure_official_updates_enabled()
         zip_path = await self.download_update_package(
             latest=latest,
             version=version,
@@ -232,6 +236,7 @@ class AstrBotUpdator(RepoZipUpdator):
             Exception: If update metadata cannot resolve a package URL.
         """
 
+        ensure_official_updates_enabled()
         update_data = await self.fetch_release_info(self.ASTRBOT_RELEASE_API, latest)
         file_url = None
 
@@ -310,5 +315,6 @@ class AstrBotUpdator(RepoZipUpdator):
             Exception: If the archive cannot be extracted or applied.
         """
 
+        ensure_official_updates_enabled()
         logger.info("AstrBot Core update package downloaded; extracting the archive.")
         self.unzip_file(str(zip_path), self.MAIN_PATH)

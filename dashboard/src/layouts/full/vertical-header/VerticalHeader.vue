@@ -446,7 +446,8 @@ function getVersion() {
   statsApi
     .version()
     .then((res) => {
-      botCurrVersion.value = "v" + (res.data.data.version || "");
+      botCurrVersion.value =
+        res.data.data.a1in_release || "v" + (res.data.data.version || "");
       dashboardCurrentVersion.value = res.data.data?.dashboard_version || "";
       commonStore.setAstrBotVersion(
         res.data.data.version || "",

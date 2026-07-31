@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
+from astrbot.a1in_release import A1IN_OFFICIAL_UPDATES_DISABLED_MESSAGE
 from astrbot.core import logger
 from astrbot.core.desktop_runtime import DESKTOP_MANAGED_RESTART_MESSAGE
 from astrbot.dashboard.async_utils import run_maybe_async
@@ -64,6 +65,15 @@ def _service_error(exc: UpdateServiceError) -> JSONResponse:
             {
                 "status": "error",
                 "message": DESKTOP_MANAGED_RESTART_MESSAGE,
+                "data": None,
+            },
+            status_code=200,
+        )
+    if exc.code == "a1in_managed":
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": A1IN_OFFICIAL_UPDATES_DISABLED_MESSAGE,
                 "data": None,
             },
             status_code=200,

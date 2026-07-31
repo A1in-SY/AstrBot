@@ -48,13 +48,14 @@ const currentThemeIcon = computed(() => {
 const versionValues = computed(() => {
   const versions = publicVersions.value;
   if (!versions) {
-    return { webui: '', runtime: '', code: '' };
+    return { webui: '', runtime: '', code: '', a1inRelease: '' };
   }
 
   return {
     webui: String(versions.webui_version || '').trim(),
     runtime: String(versions.astrbot_version || '').trim(),
     code: String(versions.astrbot_code_version || '').trim(),
+    a1inRelease: String(versions.a1in_release || '').trim(),
   };
 });
 
@@ -89,7 +90,7 @@ const versionWarnings = computed(() => {
 });
 
 const versionItems = computed(() => {
-  const { webui, runtime, code } = versionValues.value;
+  const { webui, runtime, code, a1inRelease } = versionValues.value;
   const normalized = normalizedVersionValues.value;
   const items: VersionItem[] = [];
 
@@ -105,6 +106,13 @@ const versionItems = computed(() => {
       key: 'astrbot',
       label: t('versions.astrbotRuntime'),
       value: runtime,
+    });
+  }
+  if (a1inRelease) {
+    items.push({
+      key: 'a1in-release',
+      label: t('versions.a1inRelease'),
+      value: a1inRelease,
     });
   }
   if (runtime && code && normalized.runtime !== normalized.code) {

@@ -24,6 +24,9 @@ if str(PROJECT_ROOT) not in sys.path:
 # 设置测试环境变量
 os.environ.setdefault("TESTING", "true")
 os.environ.setdefault("ASTRBOT_TEST_MODE", "true")
+# Upstream updater tests exercise generic maintenance paths; managed releases
+# remain fail-closed unless a test explicitly enables this override.
+os.environ["A1IN_ALLOW_OFFICIAL_UPDATES"] = "1"
 
 
 # ============================================================

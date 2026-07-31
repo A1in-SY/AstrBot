@@ -24,6 +24,10 @@ def get_astrbot_root() -> Path:
 
 async def check_dashboard(astrbot_root: Path) -> None:
     """Check if the dashboard is installed"""
+    from astrbot.a1in_release import (
+        A1IN_OFFICIAL_UPDATES_DISABLED_MESSAGE,
+        is_official_updates_enabled,
+    )
     from astrbot.core.config.default import VERSION
     from astrbot.core.utils.io import download_dashboard, get_dashboard_version
 
@@ -32,6 +36,10 @@ async def check_dashboard(astrbot_root: Path) -> None:
     # If the wheel ships bundled dashboard assets, no network download is needed.
     if _BUNDLED_DIST.exists():
         click.echo("Dashboard is bundled with the package – skipping download.")
+        return
+
+    if not is_official_updates_enabled():
+        click.echo(A1IN_OFFICIAL_UPDATES_DISABLED_MESSAGE)
         return
 
     try:

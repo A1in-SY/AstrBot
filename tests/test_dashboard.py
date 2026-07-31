@@ -1236,6 +1236,8 @@ async def test_version_endpoints_use_md5_password_hint(
 
     assert data["status"] == "ok"
     assert "md5_pwd_hint" in data["data"]
+    assert data["data"]["a1in_release"] == "a1in-v4.26.8.2"
+    assert data["data"]["a1in_upstream_base"] == "v4.26.8"
     assert _removed_md5_hint_alias_key() not in data["data"]
 
     response = await test_client.get(
@@ -1246,6 +1248,8 @@ async def test_version_endpoints_use_md5_password_hint(
 
     assert data["status"] == "ok"
     assert "md5_pwd_hint" in data["data"]
+    assert data["data"]["a1in_release"] == "a1in-v4.26.8.2"
+    assert data["data"]["a1in_upstream_base"] == "v4.26.8"
     assert _removed_md5_hint_alias_key() not in data["data"]
 
 
@@ -1261,6 +1265,8 @@ async def test_public_versions_endpoint_does_not_require_auth(app: FastAPIAppAda
     assert data["data"]["astrbot_version"]
     assert "webui_version" in data["data"]
     assert "astrbot_code_version" in data["data"]
+    assert data["data"]["a1in_release"] == "a1in-v4.26.8.2"
+    assert data["data"]["a1in_upstream_base"] == "v4.26.8"
     assert "change_pwd_hint" not in data["data"]
     assert "md5_pwd_hint" not in data["data"]
     assert "password_upgrade_required" not in data["data"]
@@ -2805,6 +2811,61 @@ async def test_check_update(
     data = await response.get_json()
     assert data["status"] == "success"
     assert data["data"]["has_new_version"] is False
+
+
+@pytest.mark.asyncio
+async def test_a1in_release_blocks_official_dashboard_updates(
+    app: FastAPIAppAdapter,
+    authenticated_header: dict,
+    monkeypatch,
+):
+    """A managed A1in release must not fetch or apply official update packages."""
+
+    monkeypatch.setenv("A1IN_ALLOW_OFFICIAL_UPDATES", "0")
+    test_client = app.test_client()
+
+    check_response = await test_client.get(
+        "/api/update/check",
+        headers=authenticated_header,
+    )
+    check_data = await check_response.get_json()
+
+    assert check_response.status_code == 200
+    assert check_data["status"] == "ok"
+    assert check_data["data"]["has_new_version"] is False
+    assert check_data["data"]["dashboard_has_new_version"] is False
+    assert check_data["data"]["official_updates_enabled"] is False
+
+    releases_response = await test_client.get(
+        "/api/update/releases",
+        headers=authenticated_header,
+    )
+    releases_data = await releases_response.get_json()
+
+    assert releases_response.status_code == 200
+    assert releases_data["status"] == "ok"
+    assert releases_data["data"] == []
+
+    core_response = await test_client.post(
+        "/api/update/do",
+        headers=authenticated_header,
+        json={"version": "v99.0.0", "reboot": False},
+    )
+    core_data = await core_response.get_json()
+
+    assert core_response.status_code == 200
+    assert core_data["status"] == "error"
+    assert "A1in-managed" in core_data["message"]
+
+    dashboard_response = await test_client.post(
+        "/api/update/dashboard",
+        headers=authenticated_header,
+    )
+    dashboard_data = await dashboard_response.get_json()
+
+    assert dashboard_response.status_code == 200
+    assert dashboard_data["status"] == "error"
+    assert "A1in-managed" in dashboard_data["message"]
 
 
 @pytest.mark.asyncio

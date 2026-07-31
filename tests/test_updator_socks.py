@@ -10,6 +10,7 @@ import certifi
 import httpx
 import pytest
 
+from astrbot.a1in_release import A1inOfficialUpdateDisabledError
 from astrbot.core import updator as core_updator
 from astrbot.core.star.updator import PluginUpdator
 from astrbot.core.updator import AstrBotUpdator
@@ -26,6 +27,19 @@ class _FakeJSONResponse:
 
     def json(self):
         return self._payload
+
+
+@pytest.mark.asyncio
+async def test_astrbot_updator_rejects_official_updates_for_a1in_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The updater must fail before fetching an official release feed by default."""
+
+    monkeypatch.setenv("A1IN_ALLOW_OFFICIAL_UPDATES", "0")
+    updator = AstrBotUpdator()
+
+    with pytest.raises(A1inOfficialUpdateDisabledError):
+        await updator.check_update(None, None, False)
 
 
 class _FakeStreamResponse:

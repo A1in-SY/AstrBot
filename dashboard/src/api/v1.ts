@@ -117,6 +117,11 @@ export interface ProviderEmbeddingDimensionData {
 export interface VersionData {
   version?: string;
   dashboard_version?: string;
+  a1in_release?: string;
+  a1in_release_revision?: number;
+  a1in_upstream_base?: string;
+  a1in_source_revision?: string | null;
+  official_updates_enabled?: boolean;
   change_pwd_hint?: boolean;
   md5_pwd_hint?: boolean;
   password_upgrade_required?: boolean;
@@ -127,6 +132,11 @@ export interface PublicVersionData {
   webui_version?: string | null;
   astrbot_version?: string | null;
   astrbot_code_version?: string | null;
+  a1in_release?: string | null;
+  a1in_release_revision?: number | null;
+  a1in_upstream_base?: string | null;
+  a1in_source_revision?: string | null;
+  official_updates_enabled?: boolean;
   [key: string]: unknown;
 }
 

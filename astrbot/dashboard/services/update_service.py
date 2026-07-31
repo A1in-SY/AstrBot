@@ -11,6 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from astrbot.a1in_release import (
+    A1IN_OFFICIAL_UPDATES_DISABLED_MESSAGE,
+    get_a1in_release_identity,
+    is_official_updates_enabled,
+)
 from astrbot.core import DEMO_MODE as _DEMO_MODE
 from astrbot.core import logger
 from astrbot.core import pip_installer as _pip_installer
@@ -113,6 +118,17 @@ class UpdateService:
         return UpdateServiceResult(data=progress)
 
     async def check_update(self, update_type: str | None) -> UpdateServiceResult:
+        if not is_official_updates_enabled():
+            return UpdateServiceResult(
+                data={
+                    "version": f"v{VERSION}",
+                    "has_new_version": False,
+                    "dashboard_version": f"v{VERSION}",
+                    "dashboard_has_new_version": False,
+                    **get_a1in_release_identity(),
+                },
+                message=A1IN_OFFICIAL_UPDATES_DISABLED_MESSAGE,
+            )
         try:
             dashboard_version = await self.get_dashboard_version()
             if update_type == "dashboard":
@@ -142,6 +158,11 @@ class UpdateService:
             raise UpdateServiceError(exc.__str__()) from exc
 
     async def get_releases(self) -> UpdateServiceResult:
+        if not is_official_updates_enabled():
+            return UpdateServiceResult(
+                data=[],
+                message=A1IN_OFFICIAL_UPDATES_DISABLED_MESSAGE,
+            )
         try:
             releases = await self.astrbot_updator.get_releases()
             return UpdateServiceResult(data=releases)
@@ -150,6 +171,11 @@ class UpdateService:
             raise UpdateServiceError(exc.__str__()) from exc
 
     async def update_project(self, data: object) -> UpdateServiceResult:
+        if not is_official_updates_enabled():
+            raise UpdateServiceError(
+                A1IN_OFFICIAL_UPDATES_DISABLED_MESSAGE,
+                code="a1in_managed",
+            )
         if is_desktop_managed_backend():
             raise UpdateServiceError(
                 DESKTOP_MANAGED_RESTART_MESSAGE,
@@ -389,6 +415,11 @@ class UpdateService:
             logger.debug(f"Update task failed: {exc!s}")
 
     async def update_dashboard(self) -> UpdateServiceResult:
+        if not is_official_updates_enabled():
+            raise UpdateServiceError(
+                A1IN_OFFICIAL_UPDATES_DISABLED_MESSAGE,
+                code="a1in_managed",
+            )
         try:
             try:
                 await self.download_dashboard(version=f"v{VERSION}", latest=False)

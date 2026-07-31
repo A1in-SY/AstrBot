@@ -15,6 +15,7 @@ import aiohttp
 import psutil
 from sqlmodel import col, select
 
+from astrbot.a1in_release import get_a1in_release_identity
 from astrbot.core import DEMO_MODE, logger
 from astrbot.core.config import VERSION
 from astrbot.core.config.astrbot_config import AstrBotConfig
@@ -107,6 +108,7 @@ class StatService:
         return {
             "version": VERSION,
             "dashboard_version": await get_dashboard_version(),
+            **get_a1in_release_identity(),
             "change_pwd_hint": await self.is_default_cred(),
             "md5_pwd_hint": md5_pwd_hint,
             "password_upgrade_required": not storage_upgraded,
@@ -172,6 +174,7 @@ class StatService:
             "webui_version": dashboard_version,
             "astrbot_version": VERSION,
             "astrbot_code_version": code_version,
+            **get_a1in_release_identity(),
         }
 
     def get_start_time(self) -> dict:

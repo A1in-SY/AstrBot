@@ -45,10 +45,39 @@ jobs:
             echo "Release commit does not descend from $upstream_base_tag" >&2
             exit 1
           fi
+          python3 - "$release_tag" "$upstream_base_tag" "$release_revision" <<'PY'
+          import sys
+
+          from astrbot.a1in_release import (
+              A1IN_RELEASE,
+              A1IN_RELEASE_REVISION,
+              A1IN_UPSTREAM_BASE_TAG,
+          )
+
+          release_tag, upstream_base_tag, release_revision = sys.argv[1:]
+          errors = []
+          if A1IN_RELEASE != release_tag:
+              errors.append(
+                  f"A1IN_RELEASE is {A1IN_RELEASE!r}, expected {release_tag!r}"
+              )
+          if A1IN_UPSTREAM_BASE_TAG != upstream_base_tag:
+              errors.append(
+                  "A1IN_UPSTREAM_BASE_TAG is "
+                  f"{A1IN_UPSTREAM_BASE_TAG!r}, expected {upstream_base_tag!r}"
+              )
+          if A1IN_RELEASE_REVISION != int(release_revision):
+              errors.append(
+                  "A1IN_RELEASE_REVISION is "
+                  f"{A1IN_RELEASE_REVISION!r}, expected {release_revision!r}"
+              )
+          if errors:
+              raise SystemExit("\n".join(errors))
+          PY
           revision="$(git rev-parse HEAD)"
           short_sha="$(git rev-parse --short=12 HEAD)"
 
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "release_revision=$release_revision" >> "$GITHUB_OUTPUT"
           echo "upstream_base_tag=$upstream_base_tag" >> "$GITHUB_OUTPUT"
           echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
@@ -73,7 +102,8 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run build
           mkdir -p dist/assets
-          echo "${{ steps.metadata.outputs.release_tag }}" > dist/assets/version
+          echo "${{ steps.metadata.outputs.upstream_base_tag }}" > dist/assets/version
+          echo "${{ steps.metadata.outputs.release_tag }}" > dist/assets/a1in-release
 
       - name: Bundle dashboard assets
         shell: bash
@@ -101,6 +131,8 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            A1IN_SOURCE_REVISION=${{ steps.metadata.outputs.revision }}
           tags: |
             ghcr.io/a1in-sy/astrbot:${{ steps.metadata.outputs.image_tag }}
             ghcr.io/a1in-sy/astrbot:sha-${{ steps.metadata.outputs.short_sha }}
@@ -110,3 +142,6 @@ jobs:
             org.opencontainers.image.ref.name=${{ steps.metadata.outputs.release_tag }}
             org.opencontainers.image.version=${{ steps.metadata.outputs.image_tag }}
             io.a1in.astrbot.upstream-base=${{ steps.metadata.outputs.upstream_base_tag }}
+            io.a1in.astrbot.release=${{ steps.metadata.outputs.release_tag }}
+            io.a1in.astrbot.release-revision=${{ steps.metadata.outputs.release_revision }}
+            io.a1in.astrbot.official-updates=disabled
