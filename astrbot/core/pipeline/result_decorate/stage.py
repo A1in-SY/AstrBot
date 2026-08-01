@@ -13,6 +13,7 @@ from astrbot.core.platform.message_type import MessageType
 from astrbot.core.star.session_llm_manager import SessionServiceManager
 from astrbot.core.star.star import star_map
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
+from astrbot.core.trace.service import NoopTraceSpan
 
 from ..context import PipelineContext
 from ..stage import Stage, register_stage, registered_stages
@@ -127,6 +128,7 @@ class ResultDecorateStage(Stage):
         self,
         event: AstrMessageEvent,
     ) -> None | AsyncGenerator[None, None]:
+        trace_service = getattr(self.ctx, "trace_service", None)
         result = event.get_result()
         if result is None or not result.chain:
             return
@@ -160,7 +162,27 @@ class ResultDecorateStage(Stage):
             EventType.OnDecoratingResultEvent,
             plugins_name=event.plugins_name,
         )
-        for handler in handlers:
+        for invocation_index, handler in enumerate(handlers, start=1):
+            plugin = star_map.get(handler.handler_module_path)
+            trace_span = (
+                trace_service.start_span(
+                    "plugin.hook",
+                    kind="plugin",
+                    source="plugin",
+                    plugin_id=plugin.plugin_id if plugin is not None else None,
+                    materialize=False,
+                    attributes={
+                        "handler": handler.handler_name,
+                        "event_type": handler.event_type.name,
+                        "priority": handler.extras_configs.get("priority", 0),
+                        "invocation_index": invocation_index,
+                        "event_stopped_before": event.is_stopped(),
+                        "result_present_before": event.get_result() is not None,
+                    },
+                )
+                if trace_service is not None
+                else None
+            )
             try:
                 logger.debug(
                     f"hook(on_decorating_result) -> {star_map[handler.handler_module_path].name} - {handler.handler_name}",
@@ -170,7 +192,30 @@ class ResultDecorateStage(Stage):
                         "Plugins that depend on the pre-send event hook may not work "
                         "correctly when streaming output is enabled.",
                     )
-                await handler.handler(event)
+                if trace_span is None:
+                    await handler.handler(event)
+                else:
+                    result_before = event.get_result()
+                    with trace_span:
+                        await handler.handler(event)
+                        result_after = event.get_result()
+                        if result_before is result_after:
+                            result_mutation = "unchanged"
+                        elif result_before is None:
+                            result_mutation = "set"
+                        elif result_after is None:
+                            result_mutation = "cleared"
+                        else:
+                            result_mutation = "replaced"
+                        trace_span.set_attributes(
+                            event_stopped_after=event.is_stopped(),
+                            result_present_after=result_after is not None,
+                            result_mutation=result_mutation,
+                        )
+                        trace_span.add_event(
+                            "plugin.hook.completed",
+                            result_mutation=result_mutation,
+                        )
 
                 if (result := event.get_result()) is None or not result.chain:
                     logger.debug(
@@ -179,6 +224,8 @@ class ResultDecorateStage(Stage):
                         f"{handler.handler_name} cleared the message result.",
                     )
             except BaseException:
+                if trace_service is not None:
+                    trace_service.materialize()
                 logger.error(traceback.format_exc())
 
             if event.is_stopped():
@@ -309,56 +356,90 @@ class ResultDecorateStage(Stage):
                     )
 
             if should_tts and tts_provider:
+                candidate_count = sum(
+                    isinstance(comp, Plain) and len(comp.text) > 1
+                    for comp in result.chain
+                )
+                trace_span = (
+                    trace_service.start_span(
+                        "tts.pipeline",
+                        kind="pipeline",
+                        attributes={
+                            "mode": "normal",
+                            "plain_component_count": candidate_count,
+                        },
+                    )
+                    if trace_service is not None and candidate_count
+                    else NoopTraceSpan()
+                )
+                trace_context = (
+                    trace_service.suppress()
+                    if isinstance(trace_span, NoopTraceSpan) and trace_service
+                    else trace_span
+                )
+                converted_count = 0
+                fallback_to_text_count = 0
                 new_chain = []
-                for comp in result.chain:
-                    if isinstance(comp, Plain) and len(comp.text) > 1:
-                        try:
-                            logger.info(f"TTS request: {comp.text}")
-                            audio_path = await tts_provider.get_audio(comp.text)
-                            logger.info(f"TTS result: {audio_path}")
-                            if not audio_path:
-                                logger.error(
-                                    "Failed to convert the message segment to speech "
-                                    f"because no TTS audio file was found: {comp.text}",
+                with trace_context:
+                    for comp in result.chain:
+                        if isinstance(comp, Plain) and len(comp.text) > 1:
+                            try:
+                                logger.info(f"TTS request: {comp.text}")
+                                audio_path = await tts_provider.get_audio(comp.text)
+                                logger.info(f"TTS result: {audio_path}")
+                                if not audio_path:
+                                    logger.error(
+                                        "Failed to convert the message segment to speech "
+                                        f"because no TTS audio file was found: {comp.text}",
+                                    )
+                                    fallback_to_text_count += 1
+                                    new_chain.append(comp)
+                                    continue
+
+                                event.track_temporary_local_file(audio_path)
+
+                                use_file_service = self.ctx.astrbot_config[
+                                    "provider_tts_settings"
+                                ]["use_file_service"]
+                                callback_api_base = self.ctx.astrbot_config[
+                                    "callback_api_base"
+                                ]
+                                dual_output = self.ctx.astrbot_config[
+                                    "provider_tts_settings"
+                                ]["dual_output"]
+
+                                url = None
+                                if use_file_service and callback_api_base:
+                                    token = await file_token_service.register_file(
+                                        audio_path,
+                                    )
+                                    url = f"{callback_api_base}/api/file/{token}"
+                                    logger.debug(f"Registered: {url}")
+
+                                new_chain.append(
+                                    Record(
+                                        file=url or audio_path,
+                                        url=url or audio_path,
+                                        text=comp.text,
+                                    ),
                                 )
+                                converted_count += 1
+                                if dual_output:
+                                    new_chain.append(comp)
+                            except Exception:
+                                logger.error(traceback.format_exc())
+                                logger.error("TTS failed; sending text instead.")
+                                fallback_to_text_count += 1
+                                trace_span.mark_degraded("tts_failed")
                                 new_chain.append(comp)
-                                continue
-
-                            event.track_temporary_local_file(audio_path)
-
-                            use_file_service = self.ctx.astrbot_config[
-                                "provider_tts_settings"
-                            ]["use_file_service"]
-                            callback_api_base = self.ctx.astrbot_config[
-                                "callback_api_base"
-                            ]
-                            dual_output = self.ctx.astrbot_config[
-                                "provider_tts_settings"
-                            ]["dual_output"]
-
-                            url = None
-                            if use_file_service and callback_api_base:
-                                token = await file_token_service.register_file(
-                                    audio_path,
-                                )
-                                url = f"{callback_api_base}/api/file/{token}"
-                                logger.debug(f"Registered: {url}")
-
-                            new_chain.append(
-                                Record(
-                                    file=url or audio_path,
-                                    url=url or audio_path,
-                                    text=comp.text,
-                                ),
-                            )
-                            if dual_output:
-                                new_chain.append(comp)
-                        except Exception:
-                            logger.error(traceback.format_exc())
-                            logger.error("TTS failed; sending text instead.")
+                        else:
                             new_chain.append(comp)
-                    else:
-                        new_chain.append(comp)
+                    trace_span.set_attributes(
+                        converted_count=converted_count,
+                        fallback_to_text_count=fallback_to_text_count,
+                    ).set_outcome("converted" if converted_count else "fallback_text")
+                    if fallback_to_text_count:
+                        trace_span.mark_degraded("tts_failed")
                 result.chain = new_chain
 
             # 文本转图片

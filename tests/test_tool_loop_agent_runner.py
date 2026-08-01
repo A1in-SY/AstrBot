@@ -13,12 +13,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from astrbot.core.agent.agent import Agent
 from astrbot.core.agent.handoff import HandoffTool
-from astrbot.core.agent.hooks import (
-    AGENT_LLM_HOOKS_API_VERSION,
-    AgentLLMCallRequestInfo,
-    AgentLLMCallResult,
-    BaseAgentRunHooks,
-)
+from astrbot.core.agent.hooks import BaseAgentRunHooks
 from astrbot.core.agent.message import ImageURLPart, Message, TextPart
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
@@ -195,31 +190,6 @@ class MockErrProvider(MockProvider):
             role="err",
             completion_text="primary provider returned error",
         )
-
-
-class MockErrStreamProvider(MockProvider):
-    """Return an error response before any streaming output."""
-
-    async def text_chat_stream(self, **kwargs):
-        self.call_count += 1
-        yield LLMResponse(
-            role="err",
-            completion_text="primary provider returned error",
-        )
-
-
-class BlockingLLMProvider(MockProvider):
-    """Block a provider request until its caller cancels the task."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.started = asyncio.Event()
-
-    async def text_chat(self, **kwargs) -> LLMResponse:
-        self.call_count += 1
-        self.started.set()
-        await asyncio.Future()
-        raise AssertionError("unreachable")
 
 
 class CapturingProvider(MockProvider):
@@ -415,34 +385,6 @@ class MockHooks(BaseAgentRunHooks):
         self.agent_done_called = True
 
 
-class RecordingLLMHooks(BaseAgentRunHooks):
-    """Record LLM lifecycle hook calls for assertions."""
-
-    def __init__(self) -> None:
-        self.events: list[tuple[str, int, AgentLLMCallResult | None]] = []
-
-    async def on_llm_start(self, run_context, round_index: int) -> None:
-        self.events.append(("start", round_index, None))
-
-    async def on_llm_end(
-        self,
-        run_context,
-        round_index: int,
-        result: AgentLLMCallResult,
-    ) -> None:
-        self.events.append(("end", round_index, result))
-
-
-def _configure_provider_metadata(
-    provider: MockProvider,
-    provider_id: str,
-    model: str,
-) -> None:
-    """Set deterministic provider metadata for lifecycle hook assertions."""
-    provider.provider_config["id"] = provider_id
-    provider.set_model(model)
-
-
 class MockEvent:
     def __init__(self, umo: str, sender_id: str):
         self.unified_msg_origin = umo
@@ -533,433 +475,6 @@ def runner():
 
 def _make_large_tool_result_text() -> str:
     return "x" * 100000
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True])
-async def test_llm_hooks_report_logical_round_and_core_duration(
-    runner,
-    mock_provider,
-    provider_request,
-    mock_tool_executor,
-    monkeypatch: pytest.MonkeyPatch,
-    streaming: bool,
-):
-    """Each primary provider request emits a paired lifecycle result."""
-    assert AGENT_LLM_HOOKS_API_VERSION == 1
-    mock_provider.should_call_tools = False
-    hooks = RecordingLLMHooks()
-    timestamps = iter((100, 1_000_000_100))
-    monkeypatch.setattr(
-        "astrbot.core.agent.runners.tool_loop_agent_runner.time.perf_counter_ns",
-        lambda: next(timestamps),
-    )
-
-    await runner.reset(
-        provider=mock_provider,
-        request=provider_request,
-        run_context=ContextWrapper(context=None),
-        tool_executor=mock_tool_executor,
-        agent_hooks=hooks,
-        streaming=streaming,
-    )
-
-    async for _ in runner.step_until_done(1):
-        pass
-
-    assert [(name, round_index) for name, round_index, _ in hooks.events] == [
-        ("start", 1),
-        ("end", 1),
-    ]
-    result = hooks.events[1][2]
-    assert result is not None
-    assert result.elapsed_seconds == pytest.approx(1.0)
-    assert result.response is not None
-    assert result.response.completion_text == "这是我的最终回答"
-    assert result.exception is None
-    assert result.cancelled is False
-    assert result.request_info == AgentLLMCallRequestInfo(
-        call_kind="main",
-        provider_id=None,
-        request_model=None,
-        latest_user_text="请帮我查询信息",
-    )
-
-
-@pytest.mark.asyncio
-async def test_llm_hooks_request_info_keeps_only_latest_user_text_parts(
-    runner,
-    mock_tool_executor,
-):
-    """Request metadata excludes non-text and non-user provider context."""
-    provider = MockProvider()
-    provider.should_call_tools = False
-    _configure_provider_metadata(provider, "main-provider", "provider-default")
-    hooks = RecordingLLMHooks()
-    request = ProviderRequest(
-        model="explicit-model",
-        contexts=[
-            {"role": "system", "content": "system prompt must not appear"},
-            {"role": "user", "content": "older user message"},
-            {"role": "assistant", "content": "assistant response"},
-            {"role": "tool", "content": "tool result", "tool_call_id": "call_1"},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "visible text"},
-                    {"type": "think", "think": "hidden reasoning"},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": "https://example.invalid/image.png"},
-                    },
-                    {
-                        "type": "audio_url",
-                        "audio_url": {"url": "https://example.invalid/audio.wav"},
-                    },
-                    {"type": "text", "text": " and more text"},
-                ],
-            },
-        ],
-    )
-
-    await runner.reset(
-        provider=provider,
-        request=request,
-        run_context=ContextWrapper(context=None),
-        tool_executor=mock_tool_executor,
-        agent_hooks=hooks,
-        streaming=False,
-    )
-
-    async for _ in runner.step_until_done(1):
-        pass
-
-    result = hooks.events[1][2]
-    assert result is not None
-    assert result.request_info == AgentLLMCallRequestInfo(
-        call_kind="main",
-        provider_id="main-provider",
-        request_model="explicit-model",
-        latest_user_text="visible text and more text",
-    )
-
-
-def test_llm_call_result_request_info_is_optional_for_existing_hook_users():
-    """Existing four-field AgentLLMCallResult construction remains valid."""
-    result = AgentLLMCallResult(
-        elapsed_seconds=0.1,
-        response=None,
-        exception=None,
-        cancelled=False,
-    )
-
-    assert result.request_info is None
-
-
-@pytest.mark.asyncio
-async def test_llm_hooks_cover_runner_empty_output_retries(
-    runner,
-    provider_request,
-    mock_tool_executor,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Runner-visible empty-output retries are individual logical rounds."""
-    provider = MockEmptyOutputThenSuccessProvider(failures_before_success=1)
-    _configure_provider_metadata(provider, "retry-provider", "retry-model")
-    hooks = RecordingLLMHooks()
-    monkeypatch.setattr(runner, "EMPTY_OUTPUT_RETRY_WAIT_MIN_S", 0)
-    monkeypatch.setattr(runner, "EMPTY_OUTPUT_RETRY_WAIT_MAX_S", 0)
-
-    await runner.reset(
-        provider=provider,
-        request=provider_request,
-        run_context=ContextWrapper(context=None),
-        tool_executor=mock_tool_executor,
-        agent_hooks=hooks,
-        streaming=False,
-    )
-
-    async for _ in runner.step_until_done(1):
-        pass
-
-    assert [(name, round_index) for name, round_index, _ in hooks.events] == [
-        ("start", 1),
-        ("end", 1),
-        ("start", 2),
-        ("end", 2),
-    ]
-    first_result = hooks.events[1][2]
-    second_result = hooks.events[3][2]
-    assert first_result is not None
-    assert isinstance(first_result.exception, EmptyModelOutputError)
-    assert first_result.response is None
-    assert second_result is not None
-    assert second_result.exception is None
-    assert second_result.response is not None
-    assert first_result.request_info == AgentLLMCallRequestInfo(
-        call_kind="main",
-        provider_id="retry-provider",
-        request_model="retry-model",
-        latest_user_text="请帮我查询信息",
-    )
-    assert second_result.request_info == first_result.request_info
-
-
-@pytest.mark.asyncio
-async def test_llm_hooks_cover_fallback_provider_calls(
-    runner,
-    provider_request,
-    mock_tool_executor,
-):
-    """A fallback provider request starts a new logical LLM round."""
-    primary_provider = MockFailingProvider()
-    fallback_provider = MockProvider()
-    fallback_provider.should_call_tools = False
-    _configure_provider_metadata(primary_provider, "primary", "primary-default")
-    _configure_provider_metadata(fallback_provider, "fallback", "fallback-default")
-    hooks = RecordingLLMHooks()
-    provider_request.model = "requested-primary"
-
-    await runner.reset(
-        provider=primary_provider,
-        request=provider_request,
-        run_context=ContextWrapper(context=None),
-        tool_executor=mock_tool_executor,
-        agent_hooks=hooks,
-        streaming=False,
-        fallback_providers=[fallback_provider],
-    )
-
-    async for _ in runner.step_until_done(1):
-        pass
-
-    assert [(name, round_index) for name, round_index, _ in hooks.events] == [
-        ("start", 1),
-        ("end", 1),
-        ("start", 2),
-        ("end", 2),
-    ]
-    first_result = hooks.events[1][2]
-    second_result = hooks.events[3][2]
-    assert first_result is not None
-    assert isinstance(first_result.exception, RuntimeError)
-    assert second_result is not None
-    assert second_result.response is not None
-    assert first_result.request_info == AgentLLMCallRequestInfo(
-        call_kind="main",
-        provider_id="primary",
-        request_model="requested-primary",
-        latest_user_text="请帮我查询信息",
-    )
-    assert second_result.request_info == AgentLLMCallRequestInfo(
-        call_kind="fallback",
-        provider_id="fallback",
-        request_model="fallback-default",
-        latest_user_text="请帮我查询信息",
-    )
-
-
-@pytest.mark.asyncio
-async def test_llm_hooks_exclude_injected_extra_user_text_from_main_and_fallback(
-    runner,
-    mock_tool_executor,
-):
-    """Framework-injected user parts never appear in lifecycle metadata."""
-    primary_provider = MockFailingProvider()
-    fallback_provider = MockProvider()
-    fallback_provider.should_call_tools = False
-    _configure_provider_metadata(primary_provider, "primary", "primary-default")
-    _configure_provider_metadata(fallback_provider, "fallback", "fallback-default")
-    hooks = RecordingLLMHooks()
-    request = ProviderRequest(
-        prompt="Visible user prompt",
-        extra_user_content_parts=[
-            TextPart(text="<private-framework-notice>secret</private-framework-notice>")
-        ],
-    )
-
-    await runner.reset(
-        provider=primary_provider,
-        request=request,
-        run_context=ContextWrapper(context=None),
-        tool_executor=mock_tool_executor,
-        agent_hooks=hooks,
-        streaming=False,
-        fallback_providers=[fallback_provider],
-    )
-
-    async for _ in runner.step_until_done(1):
-        pass
-
-    for event_index in (1, 3):
-        result = hooks.events[event_index][2]
-        assert result is not None
-        assert result.request_info is not None
-        assert result.request_info.latest_user_text == "Visible user prompt"
-        assert "private-framework-notice" not in result.request_info.latest_user_text
-
-
-@pytest.mark.asyncio
-async def test_llm_hooks_capture_err_response_before_streaming_fallback(
-    runner,
-    provider_request,
-    mock_tool_executor,
-):
-    """An error response without chunks is tracked before the stream falls back."""
-    primary_provider = MockErrStreamProvider()
-    fallback_provider = MockProvider()
-    fallback_provider.should_call_tools = False
-    _configure_provider_metadata(primary_provider, "primary", "primary-model")
-    _configure_provider_metadata(fallback_provider, "fallback", "fallback-model")
-    provider_request.model = "requested-primary-model"
-    hooks = RecordingLLMHooks()
-
-    await runner.reset(
-        provider=primary_provider,
-        request=provider_request,
-        run_context=ContextWrapper(context=None),
-        tool_executor=mock_tool_executor,
-        agent_hooks=hooks,
-        streaming=True,
-        fallback_providers=[fallback_provider],
-    )
-
-    async for _ in runner.step_until_done(1):
-        pass
-
-    assert [(name, round_index) for name, round_index, _ in hooks.events] == [
-        ("start", 1),
-        ("end", 1),
-        ("start", 2),
-        ("end", 2),
-    ]
-    primary_result = hooks.events[1][2]
-    fallback_result = hooks.events[3][2]
-    assert primary_result is not None
-    assert fallback_result is not None
-    assert primary_result.response is not None
-    assert primary_result.response.role == "err"
-    assert primary_result.exception is None
-    assert primary_result.request_info == AgentLLMCallRequestInfo(
-        call_kind="main",
-        provider_id="primary",
-        request_model="requested-primary-model",
-        latest_user_text="请帮我查询信息",
-    )
-    assert fallback_result.request_info == AgentLLMCallRequestInfo(
-        call_kind="fallback",
-        provider_id="fallback",
-        request_model="fallback-model",
-        latest_user_text="请帮我查询信息",
-    )
-
-
-@pytest.mark.asyncio
-async def test_llm_hooks_finish_once_when_provider_task_is_cancelled(
-    runner,
-    provider_request,
-    mock_tool_executor,
-):
-    """Task cancellation emits one terminal hook with CancelledError."""
-    provider = BlockingLLMProvider()
-    provider.should_call_tools = False
-    _configure_provider_metadata(provider, "blocking-provider", "blocking-model")
-    hooks = RecordingLLMHooks()
-
-    await runner.reset(
-        provider=provider,
-        request=provider_request,
-        run_context=ContextWrapper(context=None),
-        tool_executor=mock_tool_executor,
-        agent_hooks=hooks,
-        streaming=False,
-    )
-
-    responses = runner.step_until_done(1)
-    pending_response = asyncio.create_task(responses.__anext__())
-    await asyncio.wait_for(provider.started.wait(), timeout=5)
-    pending_response.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await pending_response
-    await responses.aclose()
-
-    assert [(name, round_index) for name, round_index, _ in hooks.events] == [
-        ("start", 1),
-        ("end", 1),
-    ]
-    result = hooks.events[1][2]
-    assert result is not None
-    assert result.response is None
-    assert isinstance(result.exception, asyncio.CancelledError)
-    assert result.cancelled is True
-    assert result.request_info == AgentLLMCallRequestInfo(
-        call_kind="main",
-        provider_id="blocking-provider",
-        request_model="blocking-model",
-        latest_user_text="请帮我查询信息",
-    )
-
-
-@pytest.mark.asyncio
-async def test_llm_hooks_cover_builtin_summary_compressor(
-    runner,
-    mock_tool_executor,
-):
-    """The built-in LLM summary request shares the runner lifecycle counter."""
-    provider = MockProvider()
-    provider.should_call_tools = False
-    provider.provider_config["max_context_tokens"] = 1
-    summary_provider = MockProvider()
-    summary_provider.should_call_tools = False
-    _configure_provider_metadata(provider, "main-provider", "main-model")
-    _configure_provider_metadata(summary_provider, "summary-provider", "summary-model")
-    hooks = RecordingLLMHooks()
-    request = ProviderRequest(
-        prompt="Current request",
-        contexts=[
-            {"role": "user", "content": "Old user message " * 20},
-            {"role": "assistant", "content": "Old assistant message " * 20},
-        ],
-    )
-
-    await runner.reset(
-        provider=provider,
-        request=request,
-        run_context=ContextWrapper(context=None),
-        tool_executor=mock_tool_executor,
-        agent_hooks=hooks,
-        streaming=False,
-        llm_compress_provider=summary_provider,
-    )
-
-    async for _ in runner.step_until_done(1):
-        pass
-
-    assert summary_provider.call_count == 1
-    assert provider.call_count == 1
-    assert [(name, round_index) for name, round_index, _ in hooks.events] == [
-        ("start", 1),
-        ("end", 1),
-        ("start", 2),
-        ("end", 2),
-    ]
-    compression_result = hooks.events[1][2]
-    main_result = hooks.events[3][2]
-    assert compression_result is not None
-    assert main_result is not None
-    assert compression_result.request_info is not None
-    assert compression_result.request_info.call_kind == "context_compression"
-    assert compression_result.request_info.provider_id == "summary-provider"
-    assert compression_result.request_info.request_model == "summary-model"
-    assert compression_result.request_info.latest_user_text is not None
-    assert "Generate a summary" in compression_result.request_info.latest_user_text
-    assert "Old user message" not in compression_result.request_info.latest_user_text
-    assert main_result.request_info == AgentLLMCallRequestInfo(
-        call_kind="main",
-        provider_id="main-provider",
-        request_model="main-model",
-        latest_user_text="Current request",
-    )
 
 
 @pytest.mark.asyncio
@@ -1766,14 +1281,13 @@ async def test_stop_signal_returns_aborted_and_persists_partial_message(
     runner, provider_request, mock_tool_executor
 ):
     provider = MockAbortableStreamProvider()
-    hooks = RecordingLLMHooks()
 
     await runner.reset(
         provider=provider,
         request=provider_request,
         run_context=ContextWrapper(context=None),
         tool_executor=mock_tool_executor,
-        agent_hooks=hooks,
+        agent_hooks=MockHooks(),
         streaming=True,
     )
 
@@ -1796,15 +1310,6 @@ async def test_stop_signal_returns_aborted_and_persists_partial_message(
     # When interrupted, the runner replaces completion_text with a system message
     assert "interrupted" in final_resp.completion_text.lower()
     assert runner.run_context.messages[-1].role == "assistant"
-    assert [(name, round_index) for name, round_index, _ in hooks.events] == [
-        ("start", 1),
-        ("end", 1),
-    ]
-    result = hooks.events[1][2]
-    assert result is not None
-    assert result.cancelled is True
-    assert result.response is None
-    assert isinstance(result.exception, GeneratorExit)
 
 
 @pytest.mark.asyncio
@@ -2018,7 +1523,6 @@ async def test_skills_like_requery_passes_extra_user_content_parts():
             )
 
     provider = SkillsLikeProvider()
-    _configure_provider_metadata(provider, "skills-provider", "skills-model")
     tool = FunctionTool(
         name="test_tool",
         description="测试",
@@ -2039,14 +1543,13 @@ async def test_skills_like_requery_passes_extra_user_content_parts():
     ctx = MockAgentContext(event)
     run_context = ContextWrapper(context=ctx)
     runner = ToolLoopAgentRunner()
-    hooks = RecordingLLMHooks()
 
     await runner.reset(
         provider=provider,
         request=req,
         run_context=run_context,
         tool_executor=cast(Any, MockToolExecutor()),
-        agent_hooks=hooks,
+        agent_hooks=MockHooks(),
         tool_schema_mode="skills_like",
     )
 
@@ -2060,93 +1563,6 @@ async def test_skills_like_requery_passes_extra_user_content_parts():
     parts = captured_kwargs["extra_user_content_parts"]
     assert len(parts) == 1
     assert parts[0].text == "<image_caption>一张猫的照片</image_caption>"
-    assert [(name, round_index) for name, round_index, _ in hooks.events] == [
-        ("start", 1),
-        ("end", 1),
-        ("start", 2),
-        ("end", 2),
-    ]
-    main_result = hooks.events[1][2]
-    requery_result = hooks.events[3][2]
-    assert main_result is not None
-    assert requery_result is not None
-    assert main_result.request_info is not None
-    assert requery_result.request_info is not None
-    assert main_result.request_info.call_kind == "main"
-    assert requery_result.request_info.call_kind == "skills_like_requery"
-    assert requery_result.request_info.provider_id == "skills-provider"
-    assert requery_result.request_info.request_model == "skills-model"
-    assert requery_result.request_info.latest_user_text == "看看这张图"
-
-
-@pytest.mark.asyncio
-async def test_llm_hooks_cover_skills_like_repair_requery(
-    runner,
-    provider_request,
-    mock_tool_executor,
-):
-    """The repair re-query is tracked as its own logical LLM round."""
-
-    class RepairProvider(MockProvider):
-        async def text_chat(self, **kwargs) -> LLMResponse:
-            self.call_count += 1
-            if self.call_count == 1:
-                return LLMResponse(
-                    role="assistant",
-                    tools_call_name=["test_tool"],
-                    tools_call_args=[{"query": "selected"}],
-                    tools_call_ids=["call_selected"],
-                )
-            if self.call_count == 2:
-                return LLMResponse(role="assistant", completion_text="")
-            return LLMResponse(
-                role="assistant",
-                tools_call_name=["test_tool"],
-                tools_call_args=[{"query": "repaired"}],
-                tools_call_ids=["call_repaired"],
-            )
-
-    provider = RepairProvider()
-    _configure_provider_metadata(provider, "repair-provider", "repair-model")
-    hooks = RecordingLLMHooks()
-    provider_request.extra_user_content_parts = [
-        TextPart(text="<private-repair-instruction>secret</private-repair-instruction>")
-    ]
-
-    await runner.reset(
-        provider=provider,
-        request=provider_request,
-        run_context=ContextWrapper(context=None),
-        tool_executor=mock_tool_executor,
-        agent_hooks=hooks,
-        streaming=False,
-        tool_schema_mode="skills_like",
-    )
-
-    async for _ in runner.step():
-        pass
-
-    assert [(name, round_index) for name, round_index, _ in hooks.events] == [
-        ("start", 1),
-        ("end", 1),
-        ("start", 2),
-        ("end", 2),
-        ("start", 3),
-        ("end", 3),
-    ]
-    assert [
-        hooks.events[index][2].request_info.call_kind  # type: ignore[union-attr]
-        for index in (1, 3, 5)
-    ] == [
-        "main",
-        "skills_like_requery",
-        "skills_like_repair",
-    ]
-    for event_index in (1, 3, 5):
-        result = hooks.events[event_index][2]
-        assert result is not None
-        assert result.request_info is not None
-        assert result.request_info.latest_user_text == "请帮我查询信息"
 
 
 @pytest.mark.asyncio

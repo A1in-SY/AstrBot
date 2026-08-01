@@ -1063,18 +1063,6 @@
         "description": "Temp Directory Size Limit (MB)",
         "hint": "Limits total size of data/temp in MB. The system checks every 10 minutes, and when exceeded, deletes oldest files first to release about 30% of current size."
       },
-      "trace_log_enable": {
-        "description": "Enable Trace File Logging",
-        "hint": "Write trace events to a separate file (does not change console output)."
-      },
-      "trace_log_path": {
-        "description": "Trace Log File Path",
-        "hint": "Relative paths are resolved under the data directory, e.g. logs/astrbot.trace.log; absolute paths are supported."
-      },
-      "trace_log_max_mb": {
-        "description": "Trace Log Max Size (MB)",
-        "hint": "Rotate when exceeding this size; default 20MB."
-      },
       "pip_install_arg": {
         "description": "Additional pip Installation Arguments",
         "hint": "When installing plugin dependencies, Python's pip tool will be used. Additional arguments can be provided here, such as `--break-system-package`."

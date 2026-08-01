@@ -7,6 +7,7 @@ from pathlib import Path
 from astrbot.core import logger
 from astrbot.core.message.components import Image, Plain, Record, Reply
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
+from astrbot.core.trace.service import NoopTraceSpan
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.media_utils import (
     describe_media_ref,
@@ -52,6 +53,7 @@ class PreProcessStage(Stage):
         event: AstrMessageEvent,
     ) -> None | AsyncGenerator[None, None]:
         """在处理事件之前的预处理"""
+        trace_service = getattr(getattr(self, "ctx", None), "trace_service", None)
         # 平台特异配置：platform_specific.<platform>.pre_ack_emoji
         supported = {"telegram", "lark", "discord"}
         platform = event.get_platform_name()
@@ -186,27 +188,74 @@ class PreProcessStage(Stage):
                     logger.warning(f"Failed to resolve the {prefix}voice path: {e}")
                     return None
 
+                trace_span = (
+                    trace_service.start_span(
+                        "stt.pipeline",
+                        kind="pipeline",
+                        attributes={"input_scope": "reply" if is_reply else "message"},
+                    )
+                    if trace_service is not None
+                    else NoopTraceSpan()
+                )
                 retry = 5
-                for i in range(retry):
-                    try:
-                        result = await stt_provider.get_text(audio_url=path)
-                        if result:
+                attempts = 0
+                failure: str | None = None
+                with trace_span:
+                    trace_span.record_json(
+                        "stt.input",
+                        {
+                            "audio_ref": path,
+                            "input_scope": "reply" if is_reply else "message",
+                        },
+                    )
+                    for i in range(retry):
+                        attempts += 1
+                        try:
+                            if isinstance(trace_span, NoopTraceSpan) and trace_service:
+                                with trace_service.suppress():
+                                    result = await stt_provider.get_text(audio_url=path)
+                            else:
+                                result = await stt_provider.get_text(audio_url=path)
+                            if result:
+                                suffix = " (referenced message)" if is_reply else ""
+                                logger.info(f"Speech-to-text{suffix} result: " + result)
+                                trace_span.set_attributes(
+                                    attempt_count=attempts,
+                                    result_present=True,
+                                    result_chars=len(result),
+                                ).set_outcome("transcribed")
+                                return Plain(result)
+                            failure = "empty_result"
+                            break
+                        except FileNotFoundError:
+                            # napcat workaround: file may not be ready immediately
+                            trace_span.add_event(
+                                "provider.retry",
+                                attempt=attempts,
+                                reason="file_not_ready",
+                            )
+                            logger.debug(
+                                f"File is not ready ({path}); retrying {i + 1}/{retry}."
+                            )
+                            await asyncio.sleep(0.5)
+                            failure = "file_not_ready"
+                            continue
+                        except (asyncio.CancelledError, GeneratorExit):
+                            raise
+                        except BaseException as e:
+                            logger.error(traceback.format_exc())
                             suffix = " (referenced message)" if is_reply else ""
-                            logger.info(f"Speech-to-text{suffix} result: " + result)
-                            return Plain(result)
-                        break
-                    except FileNotFoundError:
-                        # napcat workaround: file may not be ready immediately
-                        logger.debug(
-                            f"File is not ready ({path}); retrying {i + 1}/{retry}."
-                        )
-                        await asyncio.sleep(0.5)
-                        continue
-                    except BaseException as e:
-                        logger.error(traceback.format_exc())
-                        suffix = " (referenced message)" if is_reply else ""
-                        logger.error(f"Speech-to-text{suffix} failed: {e}")
-                        break
+                            logger.error(f"Speech-to-text{suffix} failed: {e}")
+                            failure = type(e).__name__
+                            trace_span.set_attributes(exception_type=failure)
+                            break
+                    trace_span.set_attributes(
+                        attempt_count=attempts,
+                        result_present=False,
+                    )
+                    if failure:
+                        trace_span.mark_degraded("stt_failed")
+                        trace_span.finish(status="error", outcome=failure)
                 return None
 
             message_chain = event.get_messages()

@@ -279,17 +279,6 @@ class InternalAgentSubStage(Stage):
                     runner_registered = True
                     action_type = event.get_extra("action_type")
 
-                    event.trace.record(
-                        "astr_agent_prepare",
-                        system_prompt=req.system_prompt,
-                        tools=req.func_tool.names() if req.func_tool else [],
-                        stream=streaming_response,
-                        chat_provider={
-                            "id": provider.provider_config.get("id", ""),
-                            "model": provider.get_model(),
-                        },
-                    )
-
                     # 检测 Live Mode
                     if action_type == "live":
                         # Live Mode: 使用 run_live_agent
@@ -389,12 +378,6 @@ class InternalAgentSubStage(Stage):
                             yield
 
                     final_resp = agent_runner.get_final_llm_resp()
-
-                    event.trace.record(
-                        "astr_agent_complete",
-                        stats=agent_runner.stats.to_dict(),
-                        resp=final_resp.completion_text if final_resp else None,
-                    )
 
                     asyncio.create_task(
                         _record_internal_agent_stats(

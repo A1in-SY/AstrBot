@@ -100,11 +100,6 @@ const MainRoutes = {
       component: () => import('@/views/ConsolePage.vue')
     },
     {
-      name: 'Trace',
-      path: '/trace',
-      component: () => import('@/views/TracePage.vue')
-    },
-    {
       name: 'NativeKnowledgeBase',
       path: '/knowledge-base',
       component: () => import('@/views/knowledge-base/index.vue'),
@@ -127,6 +122,11 @@ const MainRoutes = {
           props: true
         }
       ]
+    },
+    {
+      name: 'ExecutionTrace',
+      path: '/traces',
+      component: () => import('@/views/ExecutionTracePage.vue')
     },
 
     // 旧版本的知识库路由

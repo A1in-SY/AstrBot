@@ -23,7 +23,6 @@ def test_storage_cleaner_status_includes_logs_and_cache(tmp_path):
         {
             "log_file_enable": True,
             "log_file_path": "logs/astrbot.log",
-            "trace_log_enable": False,
         },
         data_dir=data_dir,
         temp_dir=temp_dir,
@@ -58,8 +57,6 @@ def test_storage_cleaner_cleanup_truncates_active_log_and_removes_cache(tmp_path
         {
             "log_file_enable": True,
             "log_file_path": "logs/astrbot.log",
-            "trace_log_enable": True,
-            "trace_log_path": "logs/astrbot.trace.log",
         },
         data_dir=data_dir,
         temp_dir=temp_dir,
@@ -69,13 +66,12 @@ def test_storage_cleaner_cleanup_truncates_active_log_and_removes_cache(tmp_path
 
     assert result["removed_bytes"] == 740
     assert result["processed_files"] == 5
-    assert result["deleted_files"] == 3
-    assert result["truncated_files"] == 2
+    assert result["deleted_files"] == 4
+    assert result["truncated_files"] == 1
     assert result["failed_files"] == 0
     assert active_log.exists()
     assert active_log.stat().st_size == 0
-    assert trace_log.exists()
-    assert trace_log.stat().st_size == 0
+    assert not trace_log.exists()
     assert not rotated_log.exists()
     assert not temp_file.exists()
     assert not registry_cache.exists()

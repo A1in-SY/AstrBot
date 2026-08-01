@@ -35,10 +35,13 @@ class EventBus:
         self.astrbot_config_mgr = astrbot_config_mgr
         # 持有正在执行的 pipeline 任务的强引用, 防止 task 在 pending 状态被 GC 回收
         self._pending_tasks: set[asyncio.Task] = set()
+        self._accepting_events = True
 
     async def dispatch(self) -> None:
         while True:
             event: AstrMessageEvent = await self.event_queue.get()
+            if not self._accepting_events:
+                return
             conf_info = self.astrbot_config_mgr.get_conf_info(event.unified_msg_origin)
             conf_id = conf_info["id"]
             conf_name = conf_info.get("name") or conf_id
@@ -49,6 +52,8 @@ class EventBus:
                     f"PipelineScheduler not found for id: {conf_id}, event ignored."
                 )
                 continue
+            if not self._accepting_events:
+                return
             task = asyncio.create_task(scheduler.execute(event))
             self._pending_tasks.add(task)
             task.add_done_callback(self._on_task_done)
@@ -61,6 +66,16 @@ class EventBus:
         exc = task.exception()
         if exc is not None:
             logger.error("Pipeline task failed.", exc_info=exc)
+
+    async def shutdown(self) -> None:
+        """Cancel and await active pipeline tasks before trace storage closes."""
+
+        self._accepting_events = False
+        while self._pending_tasks:
+            pending_tasks = tuple(self._pending_tasks)
+            for task in pending_tasks:
+                task.cancel()
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
 
     def _print_event(self, event: AstrMessageEvent, conf_name: str) -> None:
         """用于记录事件信息

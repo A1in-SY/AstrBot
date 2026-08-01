@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from contextlib import nullcontext
 
 from astrbot.core import logger
 from astrbot.core.platform import AstrMessageEvent
@@ -84,15 +85,47 @@ class PipelineScheduler:
             event (AstrMessageEvent): 事件对象
 
         """
-        active_event_registry.register(event)
-        try:
-            await self._process_stages(event)
+        trace_scope = nullcontext(None)
+        trace_service = self.ctx.trace_service
+        if trace_service is not None:
+            try:
+                trace_scope = trace_service.start_lazy_trace(
+                    "message.process",
+                    attributes={
+                        "umo": event.unified_msg_origin,
+                        "platform_id": event.get_platform_id(),
+                        "platform_name": event.get_platform_name(),
+                        "sender_id": event.get_sender_id(),
+                        "session_id": event.get_session_id(),
+                    },
+                )
+            except Exception:
+                trace_scope = nullcontext(None)
+        with trace_scope as trace:
+            if trace is not None:
+                try:
+                    trace.record_json(
+                        "message.received",
+                        {
+                            "umo": event.unified_msg_origin,
+                            "message_str": event.get_message_str(),
+                            "components": [
+                                getattr(component, "type", type(component).__name__)
+                                for component in event.get_messages()
+                            ],
+                        },
+                    )
+                except Exception:
+                    trace.mark_degraded("message_snapshot_failed")
+            active_event_registry.register(event)
+            try:
+                await self._process_stages(event)
 
-            # 发送一个空消息, 以便于后续的处理
-            if isinstance(event, WebChatMessageEvent | WecomAIBotMessageEvent):
-                await event.send(None)
+                # 发送一个空消息, 以便于后续的处理
+                if isinstance(event, WebChatMessageEvent | WecomAIBotMessageEvent):
+                    await event.send(None)
 
-            logger.debug("pipeline execution completed.")
-        finally:
-            event.cleanup_temporary_local_files()
-            active_event_registry.unregister(event)
+                logger.debug("pipeline execution completed.")
+            finally:
+                event.cleanup_temporary_local_files()
+                active_event_registry.unregister(event)

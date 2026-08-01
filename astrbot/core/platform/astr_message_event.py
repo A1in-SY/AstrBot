@@ -24,6 +24,7 @@ from astrbot.core.message.components import (
 from astrbot.core.message.message_event_result import MessageChain, MessageEventResult
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.provider.entities import ProviderRequest
+from astrbot.core.trace.message_instrumentation import instrument_message_event
 from astrbot.core.utils.metrics import Metric
 from astrbot.core.utils.trace import TraceSpan
 
@@ -99,6 +100,14 @@ class AstrMessageEvent(abc.ABC):
 
         # back_compability
         self.platform = platform_meta
+
+        # Concrete adapters override delivery methods. Install fail-open instance
+        # wrappers once their event state is available, without requiring every
+        # adapter or plugin to know about Core tracing.
+        try:
+            instrument_message_event(self)
+        except Exception:
+            pass
 
     @property
     def unified_msg_origin(self) -> str:

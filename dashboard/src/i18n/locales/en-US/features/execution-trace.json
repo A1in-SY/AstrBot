@@ -1,0 +1,83 @@
+{
+  "title": "Execution Trace",
+  "subtitle": "Inspect durable records for one message, Agent, model, tool, and delivery workflow. Streaming stores final semantic state rather than every incremental packet.",
+  "recording": "Recording",
+  "paused": "Paused",
+  "unavailable": "Runtime unavailable",
+  "overview": {
+    "traces24h": "Traces in 24h",
+    "running": "Running",
+    "errors24h": "Errors in 24h",
+    "storage": "Storage"
+  },
+  "actions": {
+    "refresh": "Refresh",
+    "cleanup": "Run cleanup",
+    "clear": "Clear completed",
+    "loadMore": "Load more",
+    "delete": "Delete",
+    "view": "View",
+    "viewArtifact": "View content",
+    "close": "Close",
+    "cancel": "Cancel",
+    "confirm": "Confirm"
+  },
+  "filters": {
+    "title": "Filters",
+    "status": "Status",
+    "operation": "Operation",
+    "degraded": "Degraded only",
+    "allStatuses": "All statuses"
+  },
+  "list": {
+    "title": "Trace list",
+    "subtitle": "Newest finished work first. Select a trace to inspect spans, events, artifacts, and links.",
+    "empty": "No matching traces yet."
+  },
+  "table": {
+    "operation": "Operation",
+    "status": "Status",
+    "started": "Started",
+    "duration": "Duration",
+    "source": "Source",
+    "plugin": "Plugin",
+    "degraded": "Degraded"
+  },
+  "detail": {
+    "title": "Trace detail",
+    "subtitle": "Spans retain real parent-child relationships; causal work outside the tree is shown as a link.",
+    "empty": "Select a trace from the list.",
+    "spans": "Spans",
+    "events": "Events",
+    "artifacts": "Artifacts",
+    "links": "Links",
+    "attributes": "Attributes",
+    "outcome": "Outcome",
+    "reasons": "Degradation reasons",
+    "noEvents": "No events",
+    "noArtifacts": "No artifacts",
+    "noLinks": "No links"
+  },
+  "artifact": {
+    "title": "Artifact content",
+    "empty": "Content is unavailable or has been cleaned up.",
+    "truncated": "This Artifact was truncated during capture."
+  },
+  "confirm": {
+    "clearTitle": "Clear completed traces",
+    "clearText": "This deletes every terminal trace and any Artifact no longer referenced by a trace. Running traces are preserved.",
+    "deleteTitle": "Delete trace",
+    "deleteText": "This deletes the selected trace and any Artifact no longer referenced by a trace."
+  },
+  "messages": {
+    "loadFailed": "Failed to load execution traces.",
+    "updateFailed": "Failed to update execution trace settings.",
+    "cleanupDone": "Cleanup complete. Deleted {count} traces.",
+    "cleanupFailed": "Failed to run cleanup.",
+    "clearDone": "Cleared {count} completed traces.",
+    "clearFailed": "Failed to clear traces.",
+    "deleteDone": "Trace deleted.",
+    "deleteFailed": "Failed to delete trace.",
+    "artifactFailed": "Failed to load Artifact content."
+  }
+}

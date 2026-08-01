@@ -40,6 +40,7 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.provider import Provider
 from astrbot.core.provider.entities import ProviderRequest
 from astrbot.core.provider.register import llm_tools
+from astrbot.core.skills.load_skill_tool import LoadSkillTool
 from astrbot.core.skills.skill_manager import (
     SkillInfo,
     SkillManager,
@@ -94,6 +95,7 @@ from astrbot.core.tools.web_search_tools import (
     TavilyWebSearchTool,
     normalize_legacy_web_search_config,
 )
+from astrbot.core.trace.agent_instrumentation import instrument_agent_runner
 from astrbot.core.utils.astrbot_path import (
     get_astrbot_system_tmp_path,
     get_astrbot_workspaces_path,
@@ -556,7 +558,7 @@ async def _ensure_persona_and_skills(
             if runtime == "none":
                 req.system_prompt += (
                     "User has not enabled the Computer Use feature. "
-                    "You cannot use shell or Python to perform skills. "
+                    "The `load_skill` tool is unavailable, so you cannot use skills. "
                     "If you need to use these capabilities, ask the user to enable Computer Use in the AstrBot WebUI -> Config."
                 )
     tmgr = plugin_context.get_llm_tool_manager()
@@ -640,14 +642,16 @@ async def _ensure_persona_and_skills(
         ).strip()
         if router_prompt:
             req.system_prompt += f"\n{router_prompt}\n"
-    try:
-        event.trace.record(
-            "sel_persona",
-            persona_id=persona_id,
-            persona_toolset=persona_toolset.names(),
+
+    if skills and runtime in {"local", "sandbox"}:
+        if req.func_tool is None:
+            req.func_tool = ToolSet()
+        req.func_tool.add_tool(
+            LoadSkillTool(
+                skills_by_name={skill.name: skill for skill in skills},
+                runtime=runtime,
+            )
         )
-    except Exception:
-        pass
 
 
 async def _request_img_caption(
@@ -1573,6 +1577,7 @@ async def build_main_agent(
         _apply_local_env_tools(req, plugin_context)
 
     agent_runner = AgentRunner()
+    instrument_agent_runner(agent_runner, plugin_context.trace_service)
     astr_agent_ctx = AstrAgentContext(
         context=plugin_context,
         event=event,

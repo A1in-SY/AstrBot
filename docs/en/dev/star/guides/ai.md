@@ -142,49 +142,36 @@ llm_resp = await self.context.tool_loop_agent(
 
 `tool_loop_agent()` method automatically handles the loop of tool invocations and LLM requests until the model stops calling tools or the maximum number of steps is reached.
 
-### Observing Agent LLM Calls
+### Adding Plugin Business Spans
 
-This self-maintained Core exposes a capability-gated lifecycle API for every logical Agent-to-Provider request made by `tool_loop_agent()`:
+Every `Star` plugin receives a fail-open `self.tracer`. Core automatically records the Agent, Provider, tool, MCP, Skill, speech, and delivery work it owns. A plugin should add only the business boundaries that Core cannot know, such as a summary's queue wait, message loading, delivery batch, or cursor update.
 
 ```py
-from astrbot.core.agent.hooks import (
-    AGENT_LLM_HOOKS_API_VERSION,
-    AgentLLMCallRequestInfo,
-    AgentLLMCallResult,
-    BaseAgentRunHooks,
-)
+async def run_summary(self) -> None:
+    # Joins the active message Trace. Outside one it is a no-op, and never
+    # creates an implicit root Trace.
+    with self.tracer.start_span(
+        "group_summary.messages.load",
+        attributes={"limit": 500},
+    ) as span:
+        messages = await self._load_messages()
+        span.set_attributes(message_count=len(messages))
+        span.record_json("group_summary.source_messages", messages)
 
-
-class TraceHooks(BaseAgentRunHooks):
-    async def on_llm_start(self, run_context, round_index: int) -> None:
-        print(f"LLM round {round_index} started")
-
-    async def on_llm_end(
-        self,
-        run_context,
-        round_index: int,
-        result: AgentLLMCallResult,
-    ) -> None:
-        request_info: AgentLLMCallRequestInfo | None = result.request_info
-        print(round_index, request_info, result.elapsed_seconds, result.cancelled)
-
-
-if AGENT_LLM_HOOKS_API_VERSION >= 1:
-    llm_resp = await self.context.tool_loop_agent(
-        event=event,
-        chat_provider_id=prov_id,
-        prompt="Summarize this conversation.",
-        agent_hooks=TraceHooks(),
-    )
+    # Use an explicit root only for independently scheduled work.
+    with self.tracer.start_root(
+        "group_summary.run",
+        attributes={"summary_mode": "automatic"},
+    ) as root:
+        await self._run_summary_work()
+        root.set_outcome("success")
 ```
 
-`round_index` starts at `1` for each agent run and counts logical requests visible to the runner. It includes main requests, runner-level empty-output retries, fallback-provider requests, `skills_like` re-queries, repair re-queries, and built-in LLM context summaries. A Provider's own HTTP retries remain one logical round.
+`start_span()` and `start_root()` return context-manager handles even while tracing is disabled or unavailable. Calling `set_attributes()`, `set_outcome()`, `add_event()`, `record_text()`, `record_json()`, `make_link()`, or `finish()` on those handles is always safe and must not affect the business result.
 
-`on_llm_end()` is called once for every started request, including normal completion, errors, stream closure, and cancellation. `elapsed_seconds` uses the Core monotonic clock. `response` and `exception` are the original provider objects, so hook implementations must treat them as read-only and avoid retaining sensitive prompts or responses unnecessarily. For a final response, the end hook runs before the runner parses the response or starts tool execution.
+Plugin operation names use lower-case dot-separated namespaces such as `group_summary.messages.load`. They cannot impersonate Core automatic operations such as `agent.run`, `model.call`, `tool.call`, `mcp.tool.call`, or `skill.load`. Do not make duplicate plugin spans around an Agent call merely to observe its internal work; Core already records that tree.
 
-API v1 also provides `result.request_info` for the exact dispatch: `call_kind`, the actual `provider_id`, the Core-selected `request_model`, and `latest_user_text`. The call kind is one of `main`, `fallback`, `skills_like_requery`, `skills_like_repair`, or `context_compression`. `request_model` describes the model selected before the Provider adapter is called; it does not claim to be a third-party service's final routing decision. `latest_user_text` is only the text content of the final `role="user"` message sent to the Provider. It excludes `role="system"`, assistant/tool messages, thinking content, tool payloads, image/audio URLs, and framework-injected `extra_user_content_parts`. It is in-memory hook metadata only. A hook that persists or displays it is responsible for applying its own authorization, redaction, and retention policy. The field is optional so existing code that constructs `AgentLLMCallResult` with its original four fields remains compatible; hooks should handle `None` explicitly.
-
-This capability applies only to native Provider calls in `ToolLoopAgentRunner`; it does not cover `llm_generate()` or other agent runner implementations. Upstream `v4.26.8` alone does not imply this API is present, so plugins must check `AGENT_LLM_HOOKS_API_VERSION >= 1` rather than checking only the AstrBot version.
+For known detached work, capture the submitting span's `trace_id` and `span_id`, start an independent root in the background task, and add a `spawned_by` Link to those captured IDs. A Link expresses causality without falsely making a background task a child of a request that has already finished.
 
 ## Multi-Agent
 

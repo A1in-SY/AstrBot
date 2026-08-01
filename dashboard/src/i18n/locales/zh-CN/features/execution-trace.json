@@ -1,0 +1,83 @@
+{
+  "title": "执行追踪",
+  "subtitle": "查看一次消息、Agent、模型、工具与投递链路的持久化观测记录。流式输出仅保存最终语义状态，不保存每个增量包。",
+  "recording": "正在记录",
+  "paused": "已暂停",
+  "unavailable": "运行时不可用",
+  "overview": {
+    "traces24h": "近 24 小时追踪",
+    "running": "运行中",
+    "errors24h": "近 24 小时错误",
+    "storage": "占用空间"
+  },
+  "actions": {
+    "refresh": "刷新",
+    "cleanup": "执行清理",
+    "clear": "清空已完成",
+    "loadMore": "加载更多",
+    "delete": "删除",
+    "view": "查看",
+    "viewArtifact": "查看内容",
+    "close": "关闭",
+    "cancel": "取消",
+    "confirm": "确认"
+  },
+  "filters": {
+    "title": "筛选",
+    "status": "状态",
+    "operation": "操作名称",
+    "degraded": "仅显示已降级",
+    "allStatuses": "全部状态"
+  },
+  "list": {
+    "title": "追踪列表",
+    "subtitle": "按结束时间倒序排列；选择一条记录查看 Span、事件、Artifact 和关联。",
+    "empty": "尚无符合条件的追踪记录。"
+  },
+  "table": {
+    "operation": "操作",
+    "status": "状态",
+    "started": "开始时间",
+    "duration": "耗时",
+    "source": "来源",
+    "plugin": "插件",
+    "degraded": "降级"
+  },
+  "detail": {
+    "title": "追踪详情",
+    "subtitle": "Span 保持真实父子关系；关联工作以 Link 单独展示。",
+    "empty": "从左侧选择一条追踪记录。",
+    "spans": "Span",
+    "events": "事件",
+    "artifacts": "Artifact",
+    "links": "关联",
+    "attributes": "属性",
+    "outcome": "结果",
+    "reasons": "降级原因",
+    "noEvents": "无事件",
+    "noArtifacts": "无 Artifact",
+    "noLinks": "无关联"
+  },
+  "artifact": {
+    "title": "Artifact 内容",
+    "empty": "内容不可用或已被清理。",
+    "truncated": "该 Artifact 在捕获时已截断。"
+  },
+  "confirm": {
+    "clearTitle": "清空已完成追踪",
+    "clearText": "这会删除所有已结束的追踪及其不再被引用的 Artifact；运行中的追踪不会删除。",
+    "deleteTitle": "删除追踪",
+    "deleteText": "这会删除当前追踪及其不再被引用的 Artifact。"
+  },
+  "messages": {
+    "loadFailed": "加载执行追踪失败。",
+    "updateFailed": "更新执行追踪设置失败。",
+    "cleanupDone": "清理完成，删除了 {count} 条追踪。",
+    "cleanupFailed": "执行清理失败。",
+    "clearDone": "已清空 {count} 条已完成追踪。",
+    "clearFailed": "清空追踪失败。",
+    "deleteDone": "追踪已删除。",
+    "deleteFailed": "删除追踪失败。",
+    "artifactFailed": "加载 Artifact 内容失败。"
+  }
+}

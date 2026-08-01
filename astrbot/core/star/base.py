@@ -11,6 +11,8 @@ from astrbot.core.utils.plugin_kv_store import PluginKVStoreMixin
 from .star import StarMetadata, star_map, star_registry
 
 if TYPE_CHECKING:
+    from astrbot.core.trace.service import PluginTracer
+
     from .context import Context
 
 logger = logging.getLogger("astrbot")
@@ -22,6 +24,7 @@ class Star(CommandParserMixin, PluginKVStoreMixin):
     author: str
     name: str
     context: Context
+    tracer: PluginTracer
     logger: logging.Logger
     """The plugin's dedicated logger, isolated from the global ``astrbot`` logger."""
 
@@ -49,6 +52,20 @@ class Star(CommandParserMixin, PluginKVStoreMixin):
             )
         except AttributeError:
             # The plugin defines ``logger`` as a read-only property; keep its own.
+            pass
+        try:
+            plugin_id = (
+                metadata.plugin_id
+                if metadata is not None
+                else getattr(
+                    self,
+                    "plugin_id",
+                    None,
+                )
+            )
+            self.tracer = context.get_plugin_tracer(plugin_id)
+        except AttributeError:
+            # Preserve legacy plugins that intentionally expose a read-only tracer.
             pass
 
     def _get_context_config(self) -> Any:

@@ -10,7 +10,6 @@ from .token_counter import EstimateTokenCounter
 from .truncator import ContextTruncator
 
 if TYPE_CHECKING:
-    from astrbot.core.agent.hooks import AgentLLMCallRequestInfo
     from astrbot.core.provider.entities import LLMResponse
 
 
@@ -21,10 +20,7 @@ class ContextManager:
         self,
         config: ContextConfig,
         llm_request_executor: Callable[
-            [
-                Callable[[], Awaitable["LLMResponse"]],
-                "AgentLLMCallRequestInfo",
-            ],
+            [Callable[[], Awaitable["LLMResponse"]], str],
             Awaitable["LLMResponse"],
         ]
         | None = None,
@@ -37,8 +33,8 @@ class ContextManager:
 
         Args:
             config: The context configuration.
-            llm_request_executor: Optional metadata-aware wrapper for LLM summary
-                requests.
+            llm_request_executor: Optional trace-aware wrapper for LLM summary
+                requests. The string argument identifies the logical call kind.
         """
         self.config = config
 

@@ -1413,6 +1413,17 @@ class PluginManager:
 
                 metadata.star_handler_full_names = full_names
 
+                if metadata.star_cls is not None:
+                    try:
+                        metadata.star_cls.tracer = self.context.get_plugin_tracer(
+                            metadata.plugin_id,
+                        )
+                    except AttributeError:
+                        logger.debug(
+                            "Plugin %s exposes a read-only tracer attribute.",
+                            metadata.name,
+                        )
+
                 # 执行 initialize() 方法
                 if hasattr(metadata.star_cls, "initialize") and metadata.star_cls:
                     await metadata.star_cls.initialize()

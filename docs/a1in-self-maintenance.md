@@ -34,13 +34,13 @@ A1in fork 负责私有功能、发布、镜像、部署和回滚。
 
 一个 A1in release 同时包含“官方兼容版本”和“A1in 发行版本”。两者不能互相覆盖。
 
-| 字段 | 位置 | 语义 | `a1in-v4.26.8.2` 示例 |
+| 字段 | 位置 | 语义 | `a1in-v4.26.8.3` 示例 |
 | --- | --- | --- | --- |
 | 官方 Git 基线 | 官方 annotated tag | 吸收上游变更的稳定边界 | `v4.26.8` |
 | 上游兼容版本 | `astrbot/__init__.py` 的 `__version__` | 插件、备份、Dashboard 兼容和官方 API 基线 | `4.26.8` |
 | Python 包版本 | `pyproject.toml` 的 `[project].version` | 必须与 `__version__` 相同 | `4.26.8` |
-| A1in 发行版本 | `astrbot/a1in_release.py` 的 `A1IN_RELEASE` | A1in source release 的唯一源码内身份 | `a1in-v4.26.8.2` |
-| A1in 发行修订号 | `A1IN_RELEASE_REVISION` | 同一官方基线内的 A1in release 序号 | `2` |
+| A1in 发行版本 | `astrbot/a1in_release.py` 的 `A1IN_RELEASE` | A1in source release 的唯一源码内身份 | `a1in-v4.26.8.3` |
+| A1in 发行修订号 | `A1IN_RELEASE_REVISION` | 同一官方基线内的 A1in release 序号 | `3` |
 | 上游基线 tag | `A1IN_UPSTREAM_BASE_TAG` | 由 `__version__` 推导的官方 tag | `v4.26.8` |
 
 更新官方版本时，必须同步更新 `pyproject.toml` 与 `astrbot/__init__.py`。不要把 A1in release string 写进 `__version__`：该字段仍被 Dashboard 下载、插件兼容、备份和版本比较逻辑使用。
@@ -57,7 +57,7 @@ Immutable deployment: ghcr.io/a1in-sy/astrbot@sha256:<digest>
 
 | 场景 | Git tag | Human image tag |
 | --- | --- | --- |
-| 官方 `v4.26.8` 上的第 2 个 A1in release | `a1in-v4.26.8.2` | `v4.26.8-a1in.2` |
+| 官方 `v4.26.8` 上的第 3 个 A1in release | `a1in-v4.26.8.3` | `v4.26.8-a1in.3` |
 | 官方 `v4.26.9` 同步完成后的第一个 A1in release | `a1in-v4.26.9.1` | `v4.26.9-a1in.1` |
 | 官方未来 `v4.27.0` 同步完成后的第一个 A1in release | `a1in-v4.27.0.1` | `v4.27.0-a1in.1` |
 
@@ -69,9 +69,9 @@ Immutable deployment: ghcr.io/a1in-sy/astrbot@sha256:<digest>
 
 ```text
 Upstream compatibility: v4.26.8
-A1in release:           a1in-v4.26.8.2
+A1in release:           a1in-v4.26.8.3
 Source revision:         <image build commit>
-Agent LLM hooks API:     1
+Execution Trace:         Core-managed
 ```
 
 这些信息会出现在启动日志、Dashboard stats API、登录页和 Dashboard 顶栏。`A1IN_SOURCE_REVISION` 由 release image build 注入，不应手工伪造为生产来源。
@@ -81,7 +81,7 @@ Dashboard 有两个不同的版本文件：
 | 文件 | 值 | 用途 |
 | --- | --- | --- |
 | `dist/assets/version` | 官方兼容 tag，例如 `v4.26.8` | Core 与 Dashboard 的兼容性判定 |
-| `dist/assets/a1in-release` | A1in release tag，例如 `a1in-v4.26.8.2` | 构建产物身份与排障 |
+| `dist/assets/a1in-release` | A1in release tag，例如 `a1in-v4.26.8.3` | 构建产物身份与排障 |
 
 不得把 `a1in-v...` 写进 `dist/assets/version`。该文件必须继续与 Core 的官方兼容版本匹配，否则 Core 会把已捆绑 Dashboard 误判为版本不兼容。
 
@@ -141,14 +141,6 @@ A1in release：<a1in tag>
 ```
 
 私有功能优先设计为显式、可检测、可文档化的扩展。插件不能只通过 `AstrBot >= X.Y.Z` 推断 A1in 私有能力。
-
-例如逐轮 LLM lifecycle hooks 使用：
-
-```python
-AGENT_LLM_HOOKS_API_VERSION >= 1
-```
-
-API v1 的回调签名、round 语义、Core 耗时定义和隐私边界不得悄悄改变。新增可选字段必须保持旧插件可忽略；改变既有语义时提升 capability API 版本。
 
 ## 9. 镜像、部署与回滚
 

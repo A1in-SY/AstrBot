@@ -5,7 +5,6 @@ from ...provider.modalities import (
     log_context_sanitize_stats,
     sanitize_contexts_by_modalities,
 )
-from ..hooks import _build_agent_llm_call_request_info
 from ..message import Message
 from .token_counter import EstimateTokenCounter, TokenCounter
 
@@ -20,7 +19,6 @@ else:
         logger = logging.getLogger("astrbot")
 
 if TYPE_CHECKING:
-    from astrbot.core.agent.hooks import AgentLLMCallRequestInfo
     from astrbot.core.provider.entities import LLMResponse
     from astrbot.core.provider.provider import Provider
 
@@ -135,10 +133,7 @@ class LLMSummaryCompressor:
         compression_threshold: float = 0.82,
         token_counter: TokenCounter | None = None,
         llm_request_executor: Callable[
-            [
-                Callable[[], Awaitable["LLMResponse"]],
-                "AgentLLMCallRequestInfo",
-            ],
+            [Callable[[], Awaitable["LLMResponse"]], str],
             Awaitable["LLMResponse"],
         ]
         | None = None,
@@ -152,8 +147,8 @@ class LLMSummaryCompressor:
             instruction_text: Custom instruction for summary generation.
             compression_threshold: The compression trigger threshold (default: 0.82).
             token_counter: Token counter used for context sizing.
-            llm_request_executor: Optional metadata-aware wrapper for the summary
-                LLM request.
+            llm_request_executor: Optional trace-aware wrapper for the summary
+                LLM request. The string argument identifies the logical call kind.
         """
         self.provider = provider
         self.keep_recent_ratio = min(max(float(keep_recent_ratio), 0.0), 0.3)
@@ -289,11 +284,6 @@ class LLMSummaryCompressor:
 
         # Generate summary
         try:
-            request_info = _build_agent_llm_call_request_info(
-                call_kind="context_compression",
-                provider=self.provider,
-                contexts=sanitized_summary_contexts,
-            )
 
             async def request() -> "LLMResponse":
                 return await self.provider.text_chat(
@@ -301,7 +291,9 @@ class LLMSummaryCompressor:
                 )
 
             if self.llm_request_executor:
-                response = await self.llm_request_executor(request, request_info)
+                response = await self.llm_request_executor(
+                    request, "context_compression"
+                )
             else:
                 response = await request()
             summary_content = (response.completion_text or "").strip()

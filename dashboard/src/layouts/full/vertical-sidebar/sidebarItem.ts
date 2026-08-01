@@ -79,6 +79,11 @@ const sidebarItem: menu[] = [
     to: '/knowledge-base',
   },
   {
+    title: 'core.navigation.trace',
+    icon: 'mdi-chart-timeline-variant',
+    to: '/traces',
+  },
+  {
     title: 'core.navigation.persona',
     icon: 'mdi-heart',
     to: '/persona'
@@ -116,11 +121,6 @@ const sidebarItem: menu[] = [
         title: 'core.navigation.console',
         icon: 'mdi-console',
         to: '/console'
-      },
-      {
-        title: 'core.navigation.trace',
-        icon: 'mdi-timeline-text-outline',
-        to: '/trace'
       },
     ]
   }

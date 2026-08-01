@@ -5,7 +5,7 @@ import time
 import traceback
 import typing as T
 import uuid
-from contextlib import aclosing, suppress
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -25,6 +25,7 @@ from tenacity import (
 )
 
 from astrbot import logger
+from astrbot.core.agent.mcp_client import MCPTool
 from astrbot.core.agent.message import ImageURLPart, TextPart, ThinkPart
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.agent.tool_image_cache import tool_image_cache
@@ -46,17 +47,19 @@ from astrbot.core.provider.modalities import (
     sanitize_contexts_by_modalities,
 )
 from astrbot.core.provider.provider import Provider
+from astrbot.core.trace.context import current_trace_service
+from astrbot.core.trace.serialization import (
+    call_tool_result_manifest,
+    function_tool_manifest,
+    normalize_trace_value,
+)
+from astrbot.core.trace.service import NoopTraceSpan
 
 from ..context.compressor import ContextCompressor
 from ..context.config import ContextConfig
 from ..context.manager import ContextManager
 from ..context.token_counter import EstimateTokenCounter, TokenCounter
-from ..hooks import (
-    AgentLLMCallRequestInfo,
-    AgentLLMCallResult,
-    BaseAgentRunHooks,
-    _build_agent_llm_call_request_info,
-)
+from ..hooks import BaseAgentRunHooks
 from ..message import (
     AssistantMessageSegment,
     Message,
@@ -67,6 +70,8 @@ from ..response import AgentResponseData, AgentStats
 from ..run_context import ContextWrapper, TContext
 from ..tool_executor import BaseFunctionToolExecutor
 from .base import AgentResponse, AgentState, BaseAgentRunner
+from .trace_helpers import activate_trace_span as _activate_trace_span
+from .trace_helpers import close_traced_stream as _close_traced_stream
 
 if sys.version_info >= (3, 12):
     from typing import override
@@ -254,7 +259,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         self._primary_provider = provider
         self.agent_hooks = agent_hooks
         self.run_context = run_context
-        self._llm_round_index = 0
+        self._trace_model_call_index = 0
         self.request_context_manager_config = ContextConfig(
             # <=0 disables token-based guarding.
             max_context_tokens=provider.provider_config.get("max_context_tokens", 0),
@@ -467,82 +472,37 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             preview = preview[:next_len]
         return preview
 
-    def _extra_user_text_parts_for_llm_metadata(self) -> list[str]:
-        """Return text blocks injected through ProviderRequest extra content.
+    def _start_model_call_span(self, call_kind: str):
+        """Start the Agent-owned logical model call when Trace is active.
 
-        These blocks may represent system notices or other framework-injected
-        instructions even though the Provider accepts them in a user-role
-        message. Lifecycle metadata must not expose them as user input.
-
-        Returns:
-            Text blocks that must be excluded from ``latest_user_text``.
+        Provider instrumentation enriches this span rather than creating a
+        duplicate child. The scope deliberately remains a no-op for runners
+        instantiated outside Core-managed execution.
         """
-        text_parts: list[str] = []
-        for part in self.req.extra_user_content_parts:
-            if isinstance(part, TextPart):
-                text_parts.append(part.text)
-            elif isinstance(part, dict):
-                text = part.get("text") if part.get("type") == "text" else None
-                if isinstance(text, str):
-                    text_parts.append(text)
-        return text_parts
 
-    async def _start_llm_call(self) -> tuple[int, int]:
-        """Notify hooks and start timing one logical Agent-to-Provider LLM call.
-
-        Returns:
-            The monotonically increasing round index and its start timestamp in
-            nanoseconds from ``time.perf_counter_ns()``.
-        """
-        self._llm_round_index += 1
-        round_index = self._llm_round_index
-        try:
-            await self.agent_hooks.on_llm_start(self.run_context, round_index)
-        except Exception as exc:
-            logger.error("Error in on_llm_start hook: %s", exc, exc_info=True)
-        return round_index, time.perf_counter_ns()
-
-    async def _end_llm_call(
-        self,
-        round_index: int,
-        started_at_ns: int,
-        response: LLMResponse | None,
-        exception: BaseException | None,
-        request_info: AgentLLMCallRequestInfo | None,
-    ) -> None:
-        """Notify hooks that one logical Agent-to-Provider LLM call has ended.
-
-        Args:
-            round_index: The logical request number within the current agent run.
-            started_at_ns: Start timestamp from ``time.perf_counter_ns()``.
-            response: Original provider response, if the request returned normally.
-            exception: Original exception, if the request did not return normally.
-            request_info: Safe metadata captured from the provider dispatch.
-        """
-        elapsed_seconds = max(0, time.perf_counter_ns() - started_at_ns) / 1_000_000_000
-        result = AgentLLMCallResult(
-            elapsed_seconds=elapsed_seconds,
-            response=response,
-            exception=exception,
-            cancelled=self._is_stop_requested()
-            or isinstance(exception, (asyncio.CancelledError, GeneratorExit)),
-            request_info=request_info,
+        self._trace_model_call_index += 1
+        trace_service = current_trace_service()
+        if trace_service is None:
+            return NoopTraceSpan()
+        return trace_service.start_span(
+            "model.call",
+            kind="provider",
+            attributes={
+                "call_kind": call_kind,
+                "model_call_index": self._trace_model_call_index,
+            },
         )
-        try:
-            await self.agent_hooks.on_llm_end(self.run_context, round_index, result)
-        except Exception as exc:
-            logger.error("Error in on_llm_end hook: %s", exc, exc_info=True)
 
     async def _call_llm(
         self,
         call: T.Callable[[], T.Awaitable[LLMResponse]],
-        request_info: AgentLLMCallRequestInfo | None = None,
+        call_kind: str,
     ) -> LLMResponse:
         """Run one non-streaming logical Agent-to-Provider LLM request.
 
         Args:
             call: Deferred provider request to execute.
-            request_info: Safe metadata captured from the provider dispatch.
+            call_kind: The Agent execution path that initiated this call.
 
         Returns:
             The original provider response.
@@ -550,23 +510,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         Raises:
             BaseException: Re-raises the original provider exception after hooks run.
         """
-        round_index, started_at_ns = await self._start_llm_call()
-        response: LLMResponse | None = None
-        exception: BaseException | None = None
-        try:
-            response = await call()
-            return response
-        except BaseException as exc:
-            exception = exc
-            raise
-        finally:
-            await self._end_llm_call(
-                round_index,
-                started_at_ns,
-                response,
-                exception,
-                request_info,
-            )
+        with self._start_model_call_span(call_kind):
+            return await call()
 
     async def _iter_llm_responses(
         self,
@@ -593,42 +538,53 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         if include_model:
             # For primary provider we keep explicit model selection if provided.
             payload["model"] = self.req.model
-        request_info = _build_agent_llm_call_request_info(
-            call_kind=call_kind,
-            provider=provider,
-            contexts=payload["contexts"],
-            explicit_model=payload.get("model"),
-            excluded_user_text_parts=self._extra_user_text_parts_for_llm_metadata(),
-        )
         if not self.streaming:
             yield await self._call_llm(
                 lambda: provider.text_chat(**payload),
-                request_info,
+                call_kind,
             )
             return
 
-        round_index, started_at_ns = await self._start_llm_call()
         response: LLMResponse | None = None
-        exception: BaseException | None = None
+        model_span = self._start_model_call_span(call_kind)
+        stream = provider.text_chat_stream(**payload)
+        stream_closed = False
         try:
-            async with aclosing(provider.text_chat_stream(**payload)) as stream:
-                async for resp in stream:
-                    if resp.is_chunk:
-                        yield resp
-                        continue
-                    response = resp
+            while True:
+                try:
+                    with _activate_trace_span(model_span):
+                        resp = await anext(stream)
+                except StopAsyncIteration:
+                    stream_closed = True
+                    model_span.finish()
                     break
+                if resp.is_chunk:
+                    yield resp
+                    continue
+                response = resp
+                await _close_traced_stream(stream, model_span)
+                stream_closed = True
+                model_span.finish()
+                break
+        except GeneratorExit:
+            await _close_traced_stream(stream, model_span)
+            stream_closed = True
+            model_span.finish(status="cancelled", outcome="generator_closed")
+            raise
+        except asyncio.CancelledError:
+            await _close_traced_stream(stream, model_span)
+            stream_closed = True
+            model_span.finish(status="cancelled", outcome="cancelled")
+            raise
         except BaseException as exc:
-            exception = exc
+            await _close_traced_stream(stream, model_span)
+            stream_closed = True
+            model_span.set_attributes(exception_type=type(exc).__name__)
+            model_span.finish(status="error", outcome="exception")
             raise
         finally:
-            await self._end_llm_call(
-                round_index,
-                started_at_ns,
-                response,
-                exception,
-                request_info,
-            )
+            if not stream_closed:
+                await _close_traced_stream(stream, model_span)
 
         if response is not None:
             yield response
@@ -1193,6 +1149,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 )
             )
             # 再执行最后一步
+            self._astrbot_trace_step_kind = "forced_final"
             async for resp in self.step():
                 yield resp
 
@@ -1313,111 +1270,147 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 )
 
                 _final_resp: CallToolResult | None = None
-                async for resp in self._iter_tool_executor_results(executor):  # type: ignore
-                    if isinstance(resp, CallToolResult):
-                        res = resp
-                        _final_resp = resp
-                        if not res.content:
-                            _append_tool_call_result(
-                                func_tool_id,
-                                "The tool returned no content.",
-                            )
-                            continue
+                tool_span = self._start_tool_call_span(
+                    func_tool,
+                    tool_call_id=func_tool_id,
+                    raw_arguments=func_tool_args,
+                    effective_arguments=valid_params,
+                )
+                executor_yield_count = 0
+                try:
+                    async for resp in self._iter_traced_tool_executor_results(
+                        executor,
+                        tool_span,
+                    ):  # type: ignore
+                        executor_yield_count += 1
+                        if isinstance(resp, CallToolResult):
+                            res = resp
+                            _final_resp = resp
+                            if not res.content:
+                                _append_tool_call_result(
+                                    func_tool_id,
+                                    "The tool returned no content.",
+                                )
+                                continue
 
-                        result_parts: list[str] = []
-                        for index, content_item in enumerate(res.content):
-                            if isinstance(content_item, TextContent):
-                                result_parts.append(content_item.text)
-                            elif isinstance(content_item, ImageContent):
-                                # Cache the image instead of sending directly
-                                cached_img = tool_image_cache.save_image(
-                                    base64_data=content_item.data,
-                                    tool_call_id=func_tool_id,
-                                    tool_name=func_tool_name,
-                                    index=index,
-                                    mime_type=content_item.mimeType or "image/png",
-                                )
-                                result_parts.append(
-                                    f"Image returned and cached at path='{cached_img.file_path}'. "
-                                    f"Review the image below. Use send_message_to_user to send it to the user if satisfied, "
-                                    f"with type='image' and path='{cached_img.file_path}'."
-                                )
-                                # Yield image info for LLM visibility (will be handled in step())
-                                yield _HandleFunctionToolsResult.from_cached_image(
-                                    cached_img
-                                )
-                            elif isinstance(content_item, EmbeddedResource):
-                                resource = content_item.resource
-                                if isinstance(resource, TextResourceContents):
-                                    result_parts.append(resource.text)
-                                elif (
-                                    isinstance(resource, BlobResourceContents)
-                                    and resource.mimeType
-                                    and resource.mimeType.startswith("image/")
-                                ):
+                            result_parts: list[str] = []
+                            for index, content_item in enumerate(res.content):
+                                if isinstance(content_item, TextContent):
+                                    result_parts.append(content_item.text)
+                                elif isinstance(content_item, ImageContent):
                                     # Cache the image instead of sending directly
                                     cached_img = tool_image_cache.save_image(
-                                        base64_data=resource.blob,
+                                        base64_data=content_item.data,
                                         tool_call_id=func_tool_id,
                                         tool_name=func_tool_name,
                                         index=index,
-                                        mime_type=resource.mimeType,
+                                        mime_type=content_item.mimeType or "image/png",
                                     )
                                     result_parts.append(
                                         f"Image returned and cached at path='{cached_img.file_path}'. "
                                         f"Review the image below. Use send_message_to_user to send it to the user if satisfied, "
                                         f"with type='image' and path='{cached_img.file_path}'."
                                     )
-                                    # Yield image info for LLM visibility
+                                    # Yield image info for LLM visibility (will be handled in step())
                                     yield _HandleFunctionToolsResult.from_cached_image(
                                         cached_img
                                     )
-                                else:
-                                    result_parts.append(
-                                        "The tool has returned a data type that is not supported."
+                                elif isinstance(content_item, EmbeddedResource):
+                                    resource = content_item.resource
+                                    if isinstance(resource, TextResourceContents):
+                                        result_parts.append(resource.text)
+                                    elif (
+                                        isinstance(resource, BlobResourceContents)
+                                        and resource.mimeType
+                                        and resource.mimeType.startswith("image/")
+                                    ):
+                                        # Cache the image instead of sending directly
+                                        cached_img = tool_image_cache.save_image(
+                                            base64_data=resource.blob,
+                                            tool_call_id=func_tool_id,
+                                            tool_name=func_tool_name,
+                                            index=index,
+                                            mime_type=resource.mimeType,
+                                        )
+                                        result_parts.append(
+                                            f"Image returned and cached at path='{cached_img.file_path}'. "
+                                            f"Review the image below. Use send_message_to_user to send it to the user if satisfied, "
+                                            f"with type='image' and path='{cached_img.file_path}'."
+                                        )
+                                        # Yield image info for LLM visibility
+                                        yield _HandleFunctionToolsResult.from_cached_image(
+                                            cached_img
+                                        )
+                                    else:
+                                        result_parts.append(
+                                            "The tool has returned a data type that is not supported."
+                                        )
+                            if result_parts:
+                                inline_result = "\n\n".join(result_parts)
+                                inline_result = (
+                                    await self._materialize_large_tool_result(
+                                        tool_call_id=func_tool_id,
+                                        content=inline_result,
                                     )
-                        if result_parts:
-                            inline_result = "\n\n".join(result_parts)
-                            inline_result = await self._materialize_large_tool_result(
-                                tool_call_id=func_tool_id,
-                                content=inline_result,
+                                )
+                                _append_tool_call_result(
+                                    func_tool_id,
+                                    inline_result
+                                    + self._build_repeated_tool_call_guidance(
+                                        func_tool_name, tool_call_streak
+                                    ),
+                                )
+
+                        elif resp is None:
+                            # Tool 直接请求发送消息给用户
+                            # 这里我们将直接结束 Agent Loop
+                            # 发送消息逻辑在 ToolExecutor 中处理了
+                            logger.warning(
+                                f"{func_tool_name} 没有返回值，或者已将结果直接发送给用户。"
                             )
+                            self._transition_state(AgentState.DONE)
+                            self.stats.end_time = time.time()
                             _append_tool_call_result(
                                 func_tool_id,
-                                inline_result
+                                "The tool has no return value, or has sent the result directly to the user."
                                 + self._build_repeated_tool_call_guidance(
                                     func_tool_name, tool_call_streak
                                 ),
                             )
-
-                    elif resp is None:
-                        # Tool 直接请求发送消息给用户
-                        # 这里我们将直接结束 Agent Loop
-                        # 发送消息逻辑在 ToolExecutor 中处理了
-                        logger.warning(
-                            f"{func_tool_name} 没有返回值，或者已将结果直接发送给用户。"
-                        )
-                        self._transition_state(AgentState.DONE)
-                        self.stats.end_time = time.time()
-                        _append_tool_call_result(
-                            func_tool_id,
-                            "The tool has no return value, or has sent the result directly to the user."
-                            + self._build_repeated_tool_call_guidance(
-                                func_tool_name, tool_call_streak
-                            ),
-                        )
-                    else:
-                        # 不应该出现其他类型
-                        logger.warning(
-                            f"Tool 返回了不支持的类型: {type(resp)}。",
-                        )
-                        _append_tool_call_result(
-                            func_tool_id,
-                            "*The tool has returned an unsupported type. Please tell the user to check the definition and implementation of this tool.*"
-                            + self._build_repeated_tool_call_guidance(
-                                func_tool_name, tool_call_streak
-                            ),
-                        )
+                        else:
+                            # 不应该出现其他类型
+                            logger.warning(
+                                f"Tool 返回了不支持的类型: {type(resp)}。",
+                            )
+                            _append_tool_call_result(
+                                func_tool_id,
+                                "*The tool has returned an unsupported type. Please tell the user to check the definition and implementation of this tool.*"
+                                + self._build_repeated_tool_call_guidance(
+                                    func_tool_name, tool_call_streak
+                                ),
+                            )
+                except _ToolExecutionInterrupted:
+                    tool_span.finish(status="cancelled", outcome="interrupted")
+                    raise
+                except asyncio.CancelledError:
+                    tool_span.finish(status="cancelled", outcome="cancelled")
+                    raise
+                except GeneratorExit:
+                    tool_span.finish(status="cancelled", outcome="generator_closed")
+                    raise
+                except BaseException as exc:
+                    tool_span.set_attributes(exception_type=type(exc).__name__)
+                    tool_span.finish(status="error", outcome="exception")
+                    raise
+                else:
+                    self._finish_tool_call_span(
+                        tool_span,
+                        final_result=_final_resp,
+                        agent_visible_result_blocks=tool_call_result_blocks[
+                            tool_result_blocks_start:
+                        ],
+                        executor_yield_count=executor_yield_count,
+                    )
 
                 try:
                     await self.agent_hooks.on_tool_end(
@@ -1526,13 +1519,6 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                 contexts = self._build_tool_requery_context(tool_names)
                 provider = self.provider
                 sanitized_contexts = self._sanitize_contexts_for_provider(contexts)
-                request_info = _build_agent_llm_call_request_info(
-                    call_kind="skills_like_requery",
-                    provider=provider,
-                    contexts=sanitized_contexts,
-                    explicit_model=self.req.model,
-                    excluded_user_text_parts=self._extra_user_text_parts_for_llm_metadata(),
-                )
                 requery_resp = await self._call_llm(
                     lambda: provider.text_chat(
                         contexts=sanitized_contexts,
@@ -1544,7 +1530,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                         abort_signal=self._abort_signal,
                         request_max_retries=self.request_max_retries,
                     ),
-                    request_info,
+                    "skills_like_requery",
                 )
                 if requery_resp:
                     llm_resp = requery_resp
@@ -1568,13 +1554,6 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                     sanitized_repair_contexts = self._sanitize_contexts_for_provider(
                         repair_contexts
                     )
-                    request_info = _build_agent_llm_call_request_info(
-                        call_kind="skills_like_repair",
-                        provider=provider,
-                        contexts=sanitized_repair_contexts,
-                        explicit_model=self.req.model,
-                        excluded_user_text_parts=self._extra_user_text_parts_for_llm_metadata(),
-                    )
                     repair_resp = await self._call_llm(
                         lambda: provider.text_chat(
                             contexts=sanitized_repair_contexts,
@@ -1586,7 +1565,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                             abort_signal=self._abort_signal,
                             request_max_retries=self.request_max_retries,
                         ),
-                        request_info,
+                        "skills_like_repair",
                     )
                     if repair_resp:
                         llm_resp = repair_resp
@@ -1658,6 +1637,110 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         with suppress(asyncio.CancelledError, RuntimeError, StopAsyncIteration):
             await close_executor()
 
+    def _start_tool_call_span(
+        self,
+        tool: FunctionTool,
+        *,
+        tool_call_id: str,
+        raw_arguments: T.Any,
+        effective_arguments: T.Any,
+    ):
+        """Create the one logical tool/MCP/Skill span for an Agent decision."""
+
+        trace_service = current_trace_service()
+        if trace_service is None:
+            return NoopTraceSpan()
+        origin = _unwrap_trace_tool(tool)
+        operation = _trace_tool_operation(origin)
+        try:
+            span = trace_service.start_span(
+                operation,
+                kind="tool",
+                attributes={
+                    "tool_name": tool.name,
+                    "tool_call_id": tool_call_id,
+                    "tool_class": type(origin).__name__,
+                    "background_submission": bool(
+                        getattr(origin, "is_background_task", False)
+                    ),
+                },
+            )
+            span.record_json("tool.definition", function_tool_manifest(origin))
+            span.record_json(
+                "tool.arguments.raw",
+                normalize_trace_value(raw_arguments),
+            )
+            span.record_json(
+                "tool.arguments.effective",
+                normalize_trace_value(effective_arguments),
+            )
+            return span
+        except Exception:
+            return NoopTraceSpan()
+
+    def _finish_tool_call_span(
+        self,
+        span: NoopTraceSpan | T.Any,
+        *,
+        final_result: CallToolResult | None,
+        agent_visible_result_blocks: list[ToolCallMessageSegment],
+        executor_yield_count: int,
+    ) -> None:
+        """Persist terminal tool semantics without changing tool return behavior."""
+
+        if isinstance(span, NoopTraceSpan):
+            return
+        try:
+            result_manifest = call_tool_result_manifest(final_result)
+            agent_visible_result = [
+                {"tool_call_id": block.tool_call_id, "content": block.content}
+                for block in agent_visible_result_blocks
+            ]
+            span.set_attributes(
+                executor_yield_count=executor_yield_count,
+                result_kind=result_manifest["result_type"],
+            )
+            span.record_json("tool.result", result_manifest)
+            span.record_json(
+                "tool.agent_visible_result",
+                normalize_trace_value(agent_visible_result),
+            )
+            if result_manifest.get("is_error"):
+                span.finish(status="error", outcome="mcp_error")
+            elif final_result is None:
+                span.finish(outcome="direct_message_or_empty")
+            else:
+                span.finish()
+        except Exception:
+            try:
+                span.mark_degraded("tool_result_capture_failed")
+                span.finish(outcome="capture_failed")
+            except Exception:
+                return
+
+    async def _iter_traced_tool_executor_results(
+        self,
+        executor: T.AsyncGenerator[ToolExecutorResultT, None],
+        span: T.Any,
+    ) -> T.AsyncGenerator[ToolExecutorResultT, None]:
+        """Advance tool execution under its span but yield results outside it."""
+
+        results = self._iter_tool_executor_results(executor)
+        results_closed = False
+        try:
+            while True:
+                try:
+                    with _activate_trace_span(span):
+                        result = await anext(results)
+                except StopAsyncIteration:
+                    results_closed = True
+                    return
+                yield result
+        finally:
+            if not results_closed:
+                with _activate_trace_span(span):
+                    await results.aclose()
+
     async def _iter_tool_executor_results(
         self,
         executor: T.AsyncGenerator[ToolExecutorResultT, None],
@@ -1701,3 +1784,28 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                     abort_task.cancel()
                     with suppress(asyncio.CancelledError):
                         await abort_task
+
+
+def _unwrap_trace_tool(tool: FunctionTool) -> FunctionTool:
+    """Follow Core permission wrappers without changing their execution behavior."""
+
+    current = tool
+    seen: set[int] = set()
+    while id(current) not in seen:
+        seen.add(id(current))
+        wrapped = getattr(current, "_wrapped", None)
+        if not isinstance(wrapped, FunctionTool):
+            break
+        current = wrapped
+    return current
+
+
+def _trace_tool_operation(tool: FunctionTool) -> str:
+    """Choose the mutually exclusive observed operation for one tool call."""
+
+    operation = getattr(tool, "trace_operation", None)
+    if operation == "skill.load":
+        return "skill.load"
+    if isinstance(tool, MCPTool):
+        return "mcp.tool.call"
+    return "tool.call"

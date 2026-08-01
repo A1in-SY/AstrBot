@@ -654,10 +654,7 @@ const systemConfigGroups = computed(() => {
             'log_level',
             'log_file_enable',
             'log_file_path',
-            'log_file_max_mb',
-            'trace_log_enable',
-            'trace_log_path',
-            'trace_log_max_mb'
+            'log_file_max_mb'
         ]),
         createGroup('tempStorage', [
             'temp_dir_max_size'

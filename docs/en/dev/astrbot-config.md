@@ -136,7 +136,7 @@ The default AstrBot configuration is as follows:
     },
     "wake_prefix": ["/"],
     "log_level": "INFO",
-    "trace_enable": False,
+    "execution_trace_enable": True,
     "pip_install_arg": "",
     "pypi_index_url": "https://mirrors.aliyun.com/pypi/simple/",
     "persona": [],  # deprecated
@@ -546,9 +546,9 @@ Wake prefix. Default is `/`. When a message starts with `/`, AstrBot is awakened
 
 Log level. Default is `INFO`. Can be set to `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`.
 
-### `trace_enable`
+### `execution_trace_enable`
 
-Whether to enable trace recording. Default is `false`. When enabled, AstrBot records execution traces, which can be viewed on the Trace page of the admin panel.
+Whether to enable durable execution tracing. Default is `true`. When enabled, AstrBot records Agent, Provider, tool, Skill, speech, and plugin business operations for the top-level Trace page of the admin panel.
 
 ### `pip_install_arg`
 

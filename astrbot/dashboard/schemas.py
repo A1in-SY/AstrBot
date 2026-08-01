@@ -177,8 +177,8 @@ class SubAgentConfigRequest(OpenModel):
     agents: list[dict[str, Any]] | None = None
 
 
-class TraceSettingsRequest(BaseModel):
-    trace_enable: bool | None = None
+class ExecutionTraceConfigRequest(BaseModel):
+    enabled: bool
 
 
 class StorageCleanupRequest(BaseModel):

@@ -36,6 +36,7 @@ from astrbot.core.star.filter.platform_adapter_type import (
     PlatformAdapterType,
 )
 from astrbot.core.subagent_orchestrator import SubAgentOrchestrator
+from astrbot.core.trace.service import NOOP_PLUGIN_TRACER, PluginTracer, TraceService
 from astrbot.core.utils.astrbot_path import get_astrbot_system_tmp_path
 
 from ..exceptions import ProviderNotFoundError
@@ -142,6 +143,7 @@ class Context:
         knowledge_base_manager: KnowledgeBaseManager,
         cron_manager: CronJobManager,
         subagent_orchestrator: SubAgentOrchestrator | None = None,
+        trace_service: TraceService | None = None,
     ) -> None:
         self._event_queue = event_queue
         """事件队列。消息平台通过事件队列传递消息事件。"""
@@ -166,6 +168,22 @@ class Context:
         self.cron_manager = cron_manager
         """Cron job manager, initialized by core lifecycle."""
         self.subagent_orchestrator = subagent_orchestrator
+        self.trace_service = trace_service
+        """Core tracing service shared by the message pipeline and plugins."""
+
+    def get_plugin_tracer(self, plugin_id: str | None) -> PluginTracer:
+        """Return a plugin-bound tracer with no-op fallback semantics.
+
+        Args:
+            plugin_id: Core-derived plugin identity, or ``None`` during legacy loading.
+
+        Returns:
+            A stable tracer object that never exposes Trace storage internals.
+        """
+
+        if self.trace_service is None:
+            return NOOP_PLUGIN_TRACER
+        return self.trace_service.get_plugin_tracer(plugin_id)
 
     async def llm_generate(
         self,
@@ -243,8 +261,6 @@ class Context:
             **kwargs: Additional keyword arguments. The kwargs will not be passed to the LLM directly for now, but can include:
                 stream: bool - whether to stream the LLM response
                 agent_hooks: BaseAgentRunHooks[AstrAgentContext] - hooks to run during agent execution.
-                    This self-maintained Core exposes per-request LLM hooks when
-                    AGENT_LLM_HOOKS_API_VERSION is at least 1.
                 agent_context: AstrAgentContext - context to use for the agent
 
                 other kwargs will be DIRECTLY passed to the runner.reset() method
@@ -262,6 +278,7 @@ class Context:
             AstrAgentContext,
         )
         from astrbot.core.astr_agent_tool_exec import FunctionToolExecutor
+        from astrbot.core.trace.agent_instrumentation import instrument_agent_runner
 
         prov = await self.provider_manager.get_provider_by_id(chat_provider_id)
         if not prov or not isinstance(prov, Provider):
@@ -291,6 +308,7 @@ class Context:
                 event=event,
             )
         agent_runner = ToolLoopAgentRunner()
+        instrument_agent_runner(agent_runner, self.trace_service)
         tool_executor = FunctionToolExecutor()
 
         streaming = kwargs.get("stream", False)
@@ -654,6 +672,9 @@ class Context:
         Args:
             provider: 提供者实例。
         """
+        from astrbot.core.trace.provider_instrumentation import instrument_provider
+
+        instrument_provider(provider, self.trace_service)
         self.provider_manager.provider_insts.append(provider)
 
     def register_llm_tool(

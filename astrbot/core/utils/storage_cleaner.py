@@ -179,13 +179,6 @@ class StorageCleaner:
                 ),
                 enabled=self._get_bool("log_file_enable", False),
             ),
-            LogFileConfig(
-                path=self._resolve_log_path(
-                    self._get_optional_str("trace_log_path"),
-                    default_relative_path="logs/astrbot.trace.log",
-                ),
-                enabled=self._get_bool("trace_log_enable", False),
-            ),
         ]
 
     def _get_optional_str(self, key: str) -> str | None:

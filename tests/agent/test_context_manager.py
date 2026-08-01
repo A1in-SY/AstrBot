@@ -91,8 +91,8 @@ class TestContextManager:
         provider = MockProvider()
         request_calls = []
 
-        async def execute_request(request, request_info):
-            request_calls.append((request, request_info))
+        async def execute_request(request, call_kind):
+            request_calls.append((request, call_kind))
             return await request()
 
         manager = ContextManager(
@@ -112,12 +112,7 @@ class TestContextManager:
 
         assert len(request_calls) == 1
         assert provider.last_text_chat_kwargs is not None
-        request_info = request_calls[0][1]
-        assert request_info.call_kind == "context_compression"
-        assert request_info.provider_id == "test_provider"
-        assert request_info.request_model == "gpt-4"
-        assert request_info.latest_user_text is not None
-        assert "Generate a summary" in request_info.latest_user_text
+        assert request_calls[0][1] == "context_compression"
 
     def test_init_with_truncate_compressor(self):
         """Test initialization with truncate-based compression (default)."""
