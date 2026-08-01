@@ -135,7 +135,12 @@
   },
   "artifact": {
     "title": "Artifact content",
+    "show": "View content",
+    "hide": "Hide content",
+    "retry": "Retry",
     "empty": "Content is unavailable or has been cleaned up.",
+    "emptyValue": "This Artifact is available, but its content is empty.",
+    "unavailable": "Artifact content is unavailable (status: {status}).",
     "truncated": "This Artifact was truncated during capture."
   },
   "confirm": {
