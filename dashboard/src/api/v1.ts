@@ -299,11 +299,27 @@ export interface ExecutionTraceListParams {
   before_ended_at?: number;
   before_trace_id?: string;
   status?: string;
+  category?: string;
   operation?: string;
   source?: string;
   kind?: string;
   plugin_id?: string;
   degraded?: boolean;
+}
+
+export interface ExecutionTraceFilterOption {
+  key: string;
+  count: number;
+}
+
+export interface ExecutionTracePluginFilterOption {
+  plugin_id: string;
+  count: number;
+}
+
+export interface ExecutionTraceFilterOptions {
+  categories: ExecutionTraceFilterOption[];
+  plugins: ExecutionTracePluginFilterOption[];
 }
 
 export interface ExecutionTraceArtifact {
@@ -804,6 +820,11 @@ export const executionTraceApi = {
   updateConfig(payload: ExecutionTraceConfigRequest) {
     return typed<ExecutionTraceConfig>(
       openApiV1.updateExecutionTraceConfig({ body: payload }),
+    );
+  },
+  filterOptions() {
+    return typed<ExecutionTraceFilterOptions>(
+      openApiV1.getExecutionTraceFilterOptions(),
     );
   },
   list(params?: ExecutionTraceListParams) {

@@ -4824,6 +4824,16 @@ paths:
         "200":
           $ref: "#/components/responses/Ok"
 
+  /api/v1/traces/filter-options:
+    get:
+      tags: [Execution Trace]
+      summary: Get data-driven execution trace filter options
+      operationId: getExecutionTraceFilterOptions
+      x-astrbot-scope: system
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+
   /api/v1/traces:
     get:
       tags: [Execution Trace]
@@ -4847,6 +4857,10 @@ paths:
           schema:
             type: string
         - name: status
+          in: query
+          schema:
+            type: string
+        - name: category
           in: query
           schema:
             type: string

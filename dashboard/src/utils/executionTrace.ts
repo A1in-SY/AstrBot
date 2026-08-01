@@ -255,6 +255,58 @@ export function executionTraceSpanLabel(span: Pick<ExecutionTraceSpan, 'operatio
   return String(span.operation || '').trim() || String(span.kind || '').trim() || '–';
 }
 
+export type ExecutionTraceCategoryKey =
+  | 'plugin'
+  | 'message_pipeline'
+  | 'scheduled'
+  | 'agent'
+  | 'tool'
+  | 'provider'
+  | 'delivery'
+  | 'other';
+
+export function executionTraceCategory(
+  trace: Pick<ExecutionTraceSummary, 'source' | 'kind' | 'attributes'>,
+): ExecutionTraceCategoryKey {
+  const source = String(trace.source || '');
+  const kind = String(trace.kind || '');
+  if (source === 'plugin') {
+    return 'plugin';
+  }
+  if (kind === 'pipeline') {
+    return 'message_pipeline';
+  }
+  if (kind === 'agent') {
+    return (trace.attributes?.trigger_reason as string | undefined) === 'cron'
+      ? 'scheduled'
+      : 'agent';
+  }
+  if (kind === 'tool') {
+    return 'tool';
+  }
+  if (kind === 'provider') {
+    return 'provider';
+  }
+  if (kind === 'delivery') {
+    return 'delivery';
+  }
+  return 'other';
+}
+
+export function executionTraceCategoryHint(
+  trace: Pick<ExecutionTraceSummary, 'source' | 'kind' | 'attributes' | 'plugin_id'>,
+): string | null {
+  if (trace.source === 'plugin') {
+    return trace.plugin_id || null;
+  }
+  if (executionTraceCategory(trace) === 'scheduled') {
+    const job = trace.attributes?.cron_job as { name?: unknown } | undefined;
+    const name = typeof job?.name === 'string' ? job.name.trim() : '';
+    return name || null;
+  }
+  return null;
+}
+
 export function executionTraceSpanLowerBound(span: ExecutionTraceSpan): boolean {
   return span.duration_is_lower_bound === true
     || span.attributes?.duration_is_lower_bound === true;

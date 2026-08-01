@@ -4,7 +4,7 @@
     "live": "实时同步"
   },
   "page": {
-    "title": "未来任务",
+    "title": "定时任务",
     "beta": "实验性",
     "subtitle": "AstrBot 会在设定时间自动唤醒，完成任务后把结果投递回目标会话。",
     "proactive": {
@@ -27,7 +27,7 @@
   },
   "platformDialog": {
     "title": "支持的消息平台",
-    "description": "只有以下平台支持主动推送消息。未来任务完成后，AstrBot 才能把结果投递回这些平台的目标会话。"
+    "description": "只有以下平台支持主动推送消息。定时任务完成后，AstrBot 才能把结果投递回这些平台的目标会话。"
   },
   "card": {
     "onceAt": "一次性 · {time}",
@@ -47,11 +47,11 @@
     "umo": "按投递地筛选",
     "noUmos": "暂无 UMO",
     "noDeliveryTarget": "未设置投递地",
-    "noMatches": "没有匹配的未来任务。"
+    "noMatches": "没有匹配的定时任务。"
   },
   "overview": {
     "totalTasks": "任务总数",
-    "totalTasksNote": "当前已注册的未来任务",
+    "totalTasksNote": "当前已注册的定时任务",
     "enabledTasks": "启用任务",
     "enabledTasksNote": "执行器会按计划唤醒并运行",
     "oneOffTasks": "一次性任务",
@@ -66,7 +66,7 @@
     },
     "delivery": {
       "title": "投递状态",
-      "subtitle": "未来任务执行后的结果，会通过支持主动消息的平台回传",
+      "subtitle": "定时任务执行后的结果，会通过支持主动消息的平台回传",
       "support": "主动投递",
       "available": "可用",
       "unavailable": "不可用",
@@ -108,7 +108,7 @@
   "form": {
     "title": "新建任务",
     "editTitle": "编辑任务",
-    "chatHint": "你可以直接通过聊天的方式来让 AstrBot 创建未来任务，而不必在此添加。",
+    "chatHint": "你可以直接通过聊天的方式来让 AstrBot 创建定时任务，而不必在此添加。",
     "runOnce": "一次性任务",
     "name": "任务名称 *",
     "note": "任务需求 *",

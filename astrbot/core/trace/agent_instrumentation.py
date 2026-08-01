@@ -13,7 +13,12 @@ from .context import TraceState, current_span_id, current_trace_state
 from .service import NoopTraceSpan, TraceService, TraceSpan
 
 
-def instrument_agent_runner(runner: Any, trace_service: TraceService | None) -> None:
+def instrument_agent_runner(
+    runner: Any,
+    trace_service: TraceService | None,
+    *,
+    attributes: dict[str, Any] | None = None,
+) -> None:
     """Attach non-invasive reset/step lifecycle tracing to one runner instance.
 
     The concrete runner remains the same object and keeps its public API.  The
@@ -23,6 +28,8 @@ def instrument_agent_runner(runner: Any, trace_service: TraceService | None) -> 
     Args:
         runner: A Core-created BaseAgentRunner implementation.
         trace_service: The Core trace service, or ``None`` when unavailable.
+        attributes: Extra attributes merged into every ``agent.run`` root span
+            created by this runner, used to record the trigger origin.
     """
 
     if trace_service is None:
@@ -30,6 +37,7 @@ def instrument_agent_runner(runner: Any, trace_service: TraceService | None) -> 
     try:
         if getattr(runner, "_astrbot_trace_instrumented", False):
             return
+        runner._astrbot_trace_extra_attributes = dict(attributes or {})
         original_reset = getattr(runner, "reset", None)
         original_step = getattr(runner, "step", None)
         original_step_until_done = getattr(runner, "step_until_done", None)
@@ -208,6 +216,9 @@ def _ensure_run_span(runner: Any, service: TraceService) -> TraceSpan | NoopTrac
         ),
         "streaming": bool(getattr(runner, "streaming", False)),
     }
+    extra_attributes = getattr(runner, "_astrbot_trace_extra_attributes", None)
+    if isinstance(extra_attributes, dict) and extra_attributes:
+        attributes = {**attributes, **extra_attributes}
     if parent_state is not None and not parent_state.terminal:
         run_span = service.start_span_with_parent(
             parent_state,

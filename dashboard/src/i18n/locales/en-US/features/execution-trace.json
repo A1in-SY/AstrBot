@@ -37,15 +37,25 @@
   },
   "filters": {
     "title": "Filters",
-    "subtitle": "Source, kind, plugin, operation, and status are filtered on the server. Text search applies only to loaded pages.",
+    "subtitle": "Type, plugin, and status are filtered on the server. Text search applies only to loaded pages.",
     "search": "Search loaded traces / context",
     "status": "Status",
-    "source": "Source",
-    "kind": "Kind",
+    "type": "Type",
+    "allTypes": "All types",
     "plugin": "Plugin ID",
-    "operation": "Operation",
+    "allPlugins": "All plugins",
     "degraded": "Degraded only",
     "allStatuses": "All statuses"
+  },
+  "categories": {
+    "plugin": "Plugin",
+    "message_pipeline": "Message pipeline",
+    "scheduled": "Scheduled task",
+    "agent": "Agent execution",
+    "tool": "Tool execution",
+    "provider": "Model/service call",
+    "delivery": "Message delivery",
+    "other": "Other"
   },
   "list": {
     "title": "Trace list",
@@ -56,6 +66,7 @@
   "table": {
     "time": "Started / ended",
     "trace": "Trace / context",
+    "type": "Type",
     "operation": "Operation",
     "status": "Status",
     "source": "Source / kind",

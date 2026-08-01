@@ -5,13 +5,17 @@ import { useRouter } from 'vue-router';
 import {
   executionTraceApi,
   type ExecutionTraceConfig,
+  type ExecutionTraceFilterOptions,
   type ExecutionTraceOverview,
   type ExecutionTraceSummary,
+  pluginApi,
 } from '@/api/v1';
 import { useI18n, useModuleI18n } from '@/i18n/composables';
 import { useToast } from '@/utils/toast';
 import {
   executionTraceDuration,
+  executionTraceCategory,
+  executionTraceCategoryHint,
   executionTraceStatusColor,
   formatExecutionTraceBytes,
   formatExecutionTraceDateTime,
@@ -42,12 +46,15 @@ const overview = ref<ExecutionTraceOverview>({
 const traces = ref<ExecutionTraceSummary[]>([]);
 const hasMore = ref(false);
 const statusFilter = ref<string | null>(null);
-const sourceFilter = ref('');
-const kindFilter = ref('');
+const categoryFilter = ref('');
 const pluginFilter = ref('');
-const operationFilter = ref('');
 const localSearch = ref('');
 const degradedOnly = ref(false);
+const filterOptions = ref<ExecutionTraceFilterOptions>({
+  categories: [],
+  plugins: [],
+});
+const pluginDisplayNames = ref<Map<string, string>>(new Map());
 const loading = ref(false);
 const listLoading = ref(false);
 const configSaving = ref(false);
@@ -68,21 +75,31 @@ const statusOptions = computed(() => [
     (status) => ({ title: status, value: status }),
   ),
 ]);
+const categoryOptions = computed(() => [
+  { title: tm('filters.allTypes'), value: '' },
+  ...filterOptions.value.categories.map((option) => ({
+    title: `${tm(`categories.${option.key}`)} (${option.count})`,
+    value: option.key,
+  })),
+]);
+const pluginOptions = computed(() => [
+  { title: tm('filters.allPlugins'), value: '' },
+  ...filterOptions.value.plugins.map((option) => ({
+    title: `${pluginDisplayName(option.plugin_id) || option.plugin_id} (${option.count})`,
+    value: option.plugin_id,
+  })),
+]);
 const filterSignature = computed(() => JSON.stringify([
   statusFilter.value,
-  sourceFilter.value.trim(),
-  kindFilter.value.trim(),
-  pluginFilter.value.trim(),
-  operationFilter.value.trim(),
+  categoryFilter.value,
+  String(pluginFilter.value || '').trim(),
   degradedOnly.value,
 ]));
 const hasFilters = computed(() =>
   Boolean(
     statusFilter.value
-    || sourceFilter.value.trim()
-    || kindFilter.value.trim()
-    || pluginFilter.value.trim()
-    || operationFilter.value.trim()
+    || categoryFilter.value
+    || String(pluginFilter.value || '').trim()
     || localSearch.value.trim()
     || degradedOnly.value,
   ),
@@ -138,6 +155,22 @@ function summaryCount(value: number | null | undefined): string {
   return value === null || value === undefined ? '–' : String(value);
 }
 
+function pluginDisplayName(pluginId: string): string {
+  return pluginDisplayNames.value.get(pluginId) || '';
+}
+
+function traceCategory(trace: ExecutionTraceSummary): string {
+  return executionTraceCategory(trace);
+}
+
+function traceCategoryHint(trace: ExecutionTraceSummary): string {
+  const hint = executionTraceCategoryHint(trace);
+  if (trace.source === 'plugin') {
+    return pluginDisplayName(hint || '') || hint || '';
+  }
+  return hint || '';
+}
+
 function traceContext(trace: ExecutionTraceSummary): Array<{ key: string; label: string; value: string }> {
   const attributes = trace.attributes || {};
   const keys = [
@@ -163,6 +196,25 @@ async function loadOverview(): Promise<void> {
   overview.value = unwrap(await executionTraceApi.overview());
 }
 
+async function loadFilterOptions(): Promise<void> {
+  filterOptions.value = unwrap(await executionTraceApi.filterOptions());
+}
+
+async function loadPluginNames(): Promise<void> {
+  try {
+    const plugins = unwrap(await pluginApi.list());
+    const map = new Map<string, string>();
+    for (const plugin of plugins || []) {
+      const author = String(plugin?.author || 'unknown').toLowerCase().replace(/\//g, '_');
+      const name = String(plugin?.name || 'unknown').toLowerCase().replace(/\//g, '_');
+      map.set(`${author}/${name}`, plugin?.display_name || plugin?.name || '');
+    }
+    pluginDisplayNames.value = map;
+  } catch {
+    pluginDisplayNames.value = new Map();
+  }
+}
+
 async function loadTraces(reset = true): Promise<void> {
   const requestId = ++listRequestId;
   const signature = filterSignature.value;
@@ -172,10 +224,8 @@ async function loadTraces(reset = true): Promise<void> {
     const response = await executionTraceApi.list({
       limit: PAGE_SIZE,
       status: statusFilter.value || undefined,
-      source: sourceFilter.value.trim() || undefined,
-      kind: kindFilter.value.trim() || undefined,
-      plugin_id: pluginFilter.value.trim() || undefined,
-      operation: operationFilter.value.trim() || undefined,
+      category: categoryFilter.value || undefined,
+      plugin_id: String(pluginFilter.value || '').trim() || undefined,
       degraded: degradedOnly.value || undefined,
       before_ended_at: last?.ended_at || last?.started_at,
       before_trace_id: last?.trace_id,
@@ -206,7 +256,13 @@ async function refresh(options: { polling?: boolean } = {}): Promise<void> {
   loading.value = true;
   loadError.value = '';
   try {
-    await Promise.all([loadConfig(), loadOverview(), loadTraces(true)]);
+    await Promise.all([
+      loadConfig(),
+      loadOverview(),
+      loadFilterOptions(),
+      loadPluginNames(),
+      loadTraces(true),
+    ]);
   } catch (error) {
     if (!options.polling) {
       loadError.value = error instanceof Error ? error.message : tm('messages.loadFailed');
@@ -239,10 +295,8 @@ function reloadForFilters(): void {
 
 function resetFilters(): void {
   statusFilter.value = null;
-  sourceFilter.value = '';
-  kindFilter.value = '';
+  categoryFilter.value = '';
   pluginFilter.value = '';
-  operationFilter.value = '';
   localSearch.value = '';
   degradedOnly.value = false;
   void loadTraces(true);
@@ -489,45 +543,25 @@ onBeforeUnmount(() => {
             variant="outlined"
             @update:model-value="reloadForFilters"
           />
-          <v-text-field
-            v-model="sourceFilter"
-            :label="tm('filters.source')"
+          <v-select
+            v-model="categoryFilter"
+            :items="categoryOptions"
+            :label="tm('filters.type')"
             clearable
             density="compact"
             hide-details
             variant="outlined"
-            @click:clear="reloadForFilters"
-            @keyup.enter="reloadForFilters"
+            @update:model-value="reloadForFilters"
           />
-          <v-text-field
-            v-model="kindFilter"
-            :label="tm('filters.kind')"
-            clearable
-            density="compact"
-            hide-details
-            variant="outlined"
-            @click:clear="reloadForFilters"
-            @keyup.enter="reloadForFilters"
-          />
-          <v-text-field
+          <v-select
             v-model="pluginFilter"
+            :items="pluginOptions"
             :label="tm('filters.plugin')"
             clearable
             density="compact"
             hide-details
             variant="outlined"
-            @click:clear="reloadForFilters"
-            @keyup.enter="reloadForFilters"
-          />
-          <v-text-field
-            v-model="operationFilter"
-            :label="tm('filters.operation')"
-            clearable
-            density="compact"
-            hide-details
-            variant="outlined"
-            @click:clear="reloadForFilters"
-            @keyup.enter="reloadForFilters"
+            @update:model-value="reloadForFilters"
           />
           <v-checkbox
             v-model="degradedOnly"
@@ -553,8 +587,7 @@ onBeforeUnmount(() => {
           <div class="trace-table-head" aria-hidden="true">
             <span>{{ tm('table.time') }}</span>
             <span>{{ tm('table.trace') }}</span>
-            <span>{{ tm('table.source') }}</span>
-            <span>{{ tm('table.operation') }}</span>
+            <span>{{ tm('table.type') }}</span>
             <span>{{ tm('table.status') }}</span>
             <span>{{ tm('table.metrics') }}</span>
             <span>{{ tm('table.actions') }}</span>
@@ -580,16 +613,11 @@ onBeforeUnmount(() => {
                 </span>
               </div>
             </div>
-            <div class="trace-source" :data-label="tm('table.source')">
-              <strong>{{ trace.source || '–' }}</strong>
-              <span>{{ trace.kind || '–' }}</span>
-              <span v-if="trace.plugin_id" class="mono">{{ trace.plugin_id }}</span>
-            </div>
-            <div class="trace-operation" :data-label="tm('table.operation')">
-              <strong :title="trace.operation">{{ trace.operation }}</strong>
-              <span :title="trace.active_span_operation || undefined">
-                {{ trace.active_span_operation || tm('table.noActiveOperation') }}
-              </span>
+            <div class="trace-source" :data-label="tm('table.type')">
+              <strong :title="`${trace.source} / ${trace.kind} / ${trace.operation}`">
+                {{ tm(`categories.${traceCategory(trace)}`) }}
+              </strong>
+              <span v-if="traceCategoryHint(trace)">{{ traceCategoryHint(trace) }}</span>
             </div>
             <div class="trace-state" :data-label="tm('table.status')">
               <div>
@@ -781,8 +809,7 @@ onBeforeUnmount(() => {
   grid-template-columns:
     minmax(0, 1.25fr)
     minmax(0, 1.35fr)
-    minmax(0, 0.8fr)
-    minmax(0, 1fr)
+    minmax(0, 0.9fr)
     minmax(0, 0.8fr)
     minmax(0, 0.95fr)
     110px;
@@ -823,7 +850,6 @@ onBeforeUnmount(() => {
 .trace-time,
 .trace-identity,
 .trace-source,
-.trace-operation,
 .trace-state,
 .trace-metrics {
   display: grid;
@@ -833,7 +859,6 @@ onBeforeUnmount(() => {
 .trace-time strong,
 .trace-identity code,
 .trace-source strong,
-.trace-operation strong,
 .trace-metrics strong {
   min-width: 0;
   overflow: hidden;
@@ -844,7 +869,6 @@ onBeforeUnmount(() => {
 
 .trace-time span,
 .trace-source span,
-.trace-operation span,
 .trace-state > span,
 .trace-metrics span {
   min-width: 0;

@@ -17,6 +17,7 @@ from .models import INLINE_ARTIFACT_BYTES, TERMINAL_TRACE_STATUSES
 
 _CAPACITY_CLEANUP_BATCH_SIZE = 32
 _CAPACITY_CLEANUP_MIN_TRACE_ESTIMATE_BYTES = 64 * 1024
+_TRACE_TRIGGER_REASON_CRON = "cron"
 
 
 class TraceStorageError(RuntimeError):
@@ -526,6 +527,7 @@ class TraceStore:
         before_ended_at: float | None = None,
         before_trace_id: str | None = None,
         status: str | None = None,
+        category: str | None = None,
         operation: str | None = None,
         source: str | None = None,
         kind: str | None = None,
@@ -544,6 +546,10 @@ class TraceStore:
         if status:
             clauses.append("t.status = ?")
             values.append(status)
+        if category:
+            category_clause, category_values = _category_filter(category)
+            clauses.append(category_clause)
+            values.extend(category_values)
         if operation:
             clauses.append("t.operation = ?")
             values.append(operation)
@@ -607,6 +613,48 @@ class TraceStore:
                 tuple(values),
             )
         return [_decode_trace_row(row) for row in rows]
+
+    async def get_filter_options(self) -> dict[str, Any]:
+        """Return data-driven filter facets for the WebUI Trace list.
+
+        Returns:
+            Distinct Trace categories and plugin IDs with their current counts.
+        """
+
+        async with self._read_lock:
+            rows = await _fetch_all(
+                self._require_read_db(),
+                """
+                SELECT
+                    source,
+                    kind,
+                    plugin_id,
+                    json_extract(attributes_json, '$.trigger_reason')
+                        AS trigger_reason,
+                    COUNT(*) AS count
+                FROM traces
+                GROUP BY source, kind, plugin_id,
+                         json_extract(attributes_json, '$.trigger_reason')
+                """,
+            )
+        categories: dict[str, int] = {}
+        plugins: dict[str, int] = {}
+        for row in rows:
+            category = trace_category(row["source"], row["kind"], row["trigger_reason"])
+            categories[category] = categories.get(category, 0) + int(row["count"])
+            plugin_id = row["plugin_id"]
+            if plugin_id:
+                plugins[plugin_id] = plugins.get(plugin_id, 0) + int(row["count"])
+        return {
+            "categories": [
+                {"key": key, "count": count}
+                for key, count in sorted(categories.items())
+            ],
+            "plugins": [
+                {"plugin_id": plugin_id, "count": count}
+                for plugin_id, count in sorted(plugins.items())
+            ],
+        }
 
     async def get_overview(self, now: float | None = None) -> dict[str, Any]:
         """Return the intentionally small trace overview used by the WebUI."""
@@ -1129,6 +1177,75 @@ def _decode_trace_row(row: aiosqlite.Row) -> dict[str, Any]:
     data["attributes"] = _decode_json(data.pop("attributes_json"), {})
     data["dropped"] = _decode_json(data.pop("dropped_json"), {})
     return data
+
+
+def trace_category(source: str, kind: str, trigger_reason: str | None) -> str:
+    """Classify a Trace root into the WebUI's user-facing category.
+
+    Args:
+        source: Who recorded the Trace root (``core`` or ``plugin``).
+        kind: Root Span kind.
+        trigger_reason: Root ``trigger_reason`` attribute, when present.
+
+    Returns:
+        Stable category key shared by the list, detail, and filter UI.
+    """
+
+    if source == "plugin":
+        return "plugin"
+    if kind == "pipeline":
+        return "message_pipeline"
+    if kind == "agent":
+        return "scheduled" if trigger_reason == _TRACE_TRIGGER_REASON_CRON else "agent"
+    if kind == "tool":
+        return "tool"
+    if kind == "provider":
+        return "provider"
+    if kind == "delivery":
+        return "delivery"
+    return "other"
+
+
+def _category_filter(category: str) -> tuple[str, list[Any]]:
+    """Build the SQL predicate for one WebUI Trace category.
+
+    Args:
+        category: A stable category key from :func:`trace_category`.
+
+    Returns:
+        SQL fragment and its bound values.
+
+    Raises:
+        ValueError: When the category key is unknown.
+    """
+
+    if category == "plugin":
+        return "t.source = ?", ["plugin"]
+    if category == "message_pipeline":
+        return "t.kind = ?", ["pipeline"]
+    if category == "scheduled":
+        return (
+            "t.kind = ? AND json_extract(t.attributes_json, '$.trigger_reason') = ?",
+            ["agent", _TRACE_TRIGGER_REASON_CRON],
+        )
+    if category == "agent":
+        return (
+            "(t.kind = ? AND (json_extract(t.attributes_json, '$.trigger_reason')"
+            " IS NULL OR json_extract(t.attributes_json, '$.trigger_reason') != ?))",
+            ["agent", _TRACE_TRIGGER_REASON_CRON],
+        )
+    if category == "tool":
+        return "t.kind = ?", ["tool"]
+    if category == "provider":
+        return "t.kind = ?", ["provider"]
+    if category == "delivery":
+        return "t.kind = ?", ["delivery"]
+    if category == "other":
+        return (
+            "t.source = ? AND t.kind NOT IN (?, ?, ?, ?, ?)",
+            ["core", "pipeline", "agent", "provider", "tool", "delivery"],
+        )
+    raise ValueError(f"unknown trace category: {category}")
 
 
 def _decode_span_row(row: aiosqlite.Row) -> dict[str, Any]:

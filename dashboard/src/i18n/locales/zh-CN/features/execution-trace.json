@@ -37,15 +37,25 @@
   },
   "filters": {
     "title": "筛选",
-    "subtitle": "来源、类型、插件、操作名和状态在服务端筛选；文本搜索只在当前已加载页内进行。",
+    "subtitle": "类型、插件和状态在服务端筛选；文本搜索只在当前已加载页内进行。",
     "search": "搜索已加载 Trace / 上下文",
     "status": "状态",
-    "source": "来源",
-    "kind": "类型",
+    "type": "类型",
+    "allTypes": "全部类型",
     "plugin": "插件 ID",
-    "operation": "操作名称",
+    "allPlugins": "全部插件",
     "degraded": "仅显示已降级",
     "allStatuses": "全部状态"
+  },
+  "categories": {
+    "plugin": "插件业务",
+    "message_pipeline": "消息流水线",
+    "scheduled": "定时任务",
+    "agent": "Agent 执行",
+    "tool": "工具执行",
+    "provider": "模型/服务调用",
+    "delivery": "消息投递",
+    "other": "其他"
   },
   "list": {
     "title": "追踪列表",
@@ -56,6 +66,7 @@
   "table": {
     "time": "开始 / 结束时间",
     "trace": "Trace / 上下文",
+    "type": "类型",
     "operation": "操作",
     "status": "状态",
     "source": "来源 / 类型",
