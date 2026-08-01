@@ -135,7 +135,12 @@
   },
   "artifact": {
     "title": "Artifact 内容",
+    "show": "查看内容",
+    "hide": "收起内容",
+    "retry": "重试",
     "empty": "内容不可用或已被清理。",
+    "emptyValue": "该 Artifact 可用，但内容为空。",
+    "unavailable": "Artifact 内容不可用（状态：{status}）。",
     "truncated": "该 Artifact 在捕获时已截断。"
   },
   "confirm": {

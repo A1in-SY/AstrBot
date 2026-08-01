@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 
-import type {
-  ExecutionTraceArtifactRef,
-  ExecutionTraceEvent,
-  ExecutionTraceLink,
-  ExecutionTraceSpan,
+import {
+  executionTraceApi,
+  type ExecutionTraceArtifact,
+  type ExecutionTraceArtifactRef,
+  type ExecutionTraceEvent,
+  type ExecutionTraceLink,
+  type ExecutionTraceSpan,
 } from '@/api/v1';
 import { useI18n, useModuleI18n } from '@/i18n/composables';
 import {
@@ -35,6 +37,12 @@ const emit = defineEmits<{
 const { locale } = useI18n();
 const { tm } = useModuleI18n('features/execution-trace');
 
+const artifactBodies = ref<Record<string, ExecutionTraceArtifact>>({});
+const artifactLoading = ref<Record<string, boolean>>({});
+const artifactErrors = ref<Record<string, string>>({});
+const expandedArtifacts = ref<Record<string, boolean>>({});
+let artifactRequestEpoch = 0;
+
 const spanEvents = computed(() =>
   props.span ? props.events.filter((event) => event.span_id === props.span?.span_id) : [],
 );
@@ -51,6 +59,21 @@ const spanDuration = computed(() =>
 );
 const hasAttributes = computed(() => Object.keys(props.span?.attributes || {}).length > 0);
 
+watch(
+  () => `${props.modelValue}:${props.span?.trace_id || ''}:${props.span?.span_id || ''}`,
+  () => {
+    artifactRequestEpoch += 1;
+    artifactBodies.value = {};
+    artifactLoading.value = {};
+    artifactErrors.value = {};
+    expandedArtifacts.value = {};
+  },
+);
+
+onBeforeUnmount(() => {
+  artifactRequestEpoch += 1;
+});
+
 function close() {
   emit('update:modelValue', false);
 }
@@ -64,6 +87,84 @@ function formatTarget(link: ExecutionTraceLink): string {
     return `${link.target_trace_id} / ${link.target_span_id}`;
   }
   return link.target_trace_id || link.target_span_id || '–';
+}
+
+function artifactStatus(artifactRef: ExecutionTraceArtifactRef): string {
+  return String(
+    artifactBodies.value[artifactRef.content_hash]?.metadata?.artifact_status
+      || artifactRef.artifact_status
+      || '',
+  );
+}
+
+function artifactRefKey(artifactRef: ExecutionTraceArtifactRef): string {
+  return `${artifactRef.span_id}:${artifactRef.ref_index}`;
+}
+
+function formatArtifactContent(artifact: ExecutionTraceArtifact): string {
+  const mediaType = String(artifact.metadata?.media_type || '').toLowerCase();
+  if (mediaType.includes('/json') || mediaType.includes('+json')) {
+    try {
+      return JSON.stringify(JSON.parse(artifact.content), null, 2);
+    } catch {
+      return artifact.content;
+    }
+  }
+  return artifact.content;
+}
+
+async function loadArtifactContent(artifactRef: ExecutionTraceArtifactRef): Promise<void> {
+  const contentHash = artifactRef.content_hash;
+  const currentStatus = artifactStatus(artifactRef);
+  if (
+    artifactBodies.value[contentHash]
+    || artifactLoading.value[contentHash]
+    || (currentStatus && currentStatus !== 'available')
+  ) {
+    return;
+  }
+
+  const requestEpoch = artifactRequestEpoch;
+  artifactLoading.value = { ...artifactLoading.value, [contentHash]: true };
+  artifactErrors.value = { ...artifactErrors.value, [contentHash]: '' };
+  try {
+    const response = await executionTraceApi.artifact(contentHash);
+    if (response.data.status !== 'ok') {
+      throw new Error(response.data.message || tm('messages.artifactFailed'));
+    }
+    if (requestEpoch === artifactRequestEpoch) {
+      artifactBodies.value = {
+        ...artifactBodies.value,
+        [contentHash]: response.data.data,
+      };
+    }
+  } catch {
+    if (requestEpoch === artifactRequestEpoch) {
+      artifactErrors.value = {
+        ...artifactErrors.value,
+        [contentHash]: tm('messages.artifactFailed'),
+      };
+    }
+  } finally {
+    if (requestEpoch === artifactRequestEpoch) {
+      artifactLoading.value = { ...artifactLoading.value, [contentHash]: false };
+    }
+  }
+}
+
+function toggleArtifactContent(artifactRef: ExecutionTraceArtifactRef): void {
+  const contentHash = artifactRef.content_hash;
+  const refKey = artifactRefKey(artifactRef);
+  const expanded = !expandedArtifacts.value[refKey];
+  expandedArtifacts.value = { ...expandedArtifacts.value, [refKey]: expanded };
+  if (expanded) {
+    void loadArtifactContent(artifactRef);
+  }
+}
+
+function retryArtifactContent(artifactRef: ExecutionTraceArtifactRef): void {
+  artifactErrors.value = { ...artifactErrors.value, [artifactRef.content_hash]: '' };
+  void loadArtifactContent(artifactRef);
 }
 </script>
 
@@ -186,7 +287,7 @@ function formatTarget(link: ExecutionTraceLink): string {
                   </div>
                   <div>
                     <dt>{{ tm('spanDialog.artifactStatus') }}</dt>
-                    <dd>{{ artifactRef.artifact_status || '–' }}</dd>
+                    <dd>{{ artifactStatus(artifactRef) || '–' }}</dd>
                   </div>
                   <div>
                     <dt>{{ tm('spanDialog.truncated') }}</dt>
@@ -197,6 +298,79 @@ function formatTarget(link: ExecutionTraceLink): string {
                   <summary>{{ tm('spanDialog.metadata') }}</summary>
                   <pre class="json-block">{{ safeExecutionTraceJson(artifactRef.metadata) }}</pre>
                 </details>
+                <div class="artifact-actions">
+                  <v-btn
+                    color="primary"
+                    size="small"
+                    variant="tonal"
+                    :loading="artifactLoading[artifactRef.content_hash]"
+                    @click="toggleArtifactContent(artifactRef)"
+                  >
+                    {{ expandedArtifacts[artifactRefKey(artifactRef)]
+                      ? tm('artifact.hide')
+                      : tm('artifact.show') }}
+                  </v-btn>
+                </div>
+                <div
+                  v-if="expandedArtifacts[artifactRefKey(artifactRef)]"
+                  class="artifact-content-panel"
+                >
+                  <v-progress-linear
+                    v-if="artifactLoading[artifactRef.content_hash]"
+                    color="primary"
+                    indeterminate
+                  />
+                  <v-alert
+                    v-else-if="artifactErrors[artifactRef.content_hash]"
+                    density="compact"
+                    type="error"
+                    variant="tonal"
+                  >
+                    <div class="artifact-error-row">
+                      <span>{{ artifactErrors[artifactRef.content_hash] }}</span>
+                      <v-btn
+                        size="small"
+                        variant="text"
+                        @click="retryArtifactContent(artifactRef)"
+                      >
+                        {{ tm('artifact.retry') }}
+                      </v-btn>
+                    </div>
+                  </v-alert>
+                  <template v-else-if="artifactBodies[artifactRef.content_hash]">
+                    <v-alert
+                      v-if="artifactRef.truncated
+                        || artifactBodies[artifactRef.content_hash].metadata?.truncated"
+                      class="artifact-content-alert"
+                      density="compact"
+                      type="warning"
+                      variant="tonal"
+                    >
+                      {{ tm('artifact.truncated') }}
+                    </v-alert>
+                    <p v-if="artifactStatus(artifactRef) !== 'available'" class="empty-copy">
+                      {{ tm('artifact.unavailable', { status: artifactStatus(artifactRef) || 'unknown' }) }}
+                    </p>
+                    <p
+                      v-else-if="artifactBodies[artifactRef.content_hash].content.length === 0"
+                      class="empty-copy"
+                    >
+                      {{ tm('artifact.emptyValue') }}
+                    </p>
+                    <pre
+                      v-else
+                      class="artifact-content"
+                      v-text="formatArtifactContent(artifactBodies[artifactRef.content_hash])"
+                    />
+                  </template>
+                  <p v-else class="empty-copy">
+                    {{ artifactStatus(artifactRef) === 'available'
+                      ? tm('artifact.empty')
+                      : tm('artifact.unavailable', {
+                        status: artifactStatus(artifactRef) || 'unknown',
+                      }) }}
+                  </p>
+                </div>
               </article>
             </div>
             <p v-else class="empty-copy">{{ tm('detail.noArtifacts') }}</p>
@@ -366,6 +540,45 @@ function formatTarget(link: ExecutionTraceLink): string {
 
 .record-details summary {
   cursor: pointer;
+}
+
+.artifact-actions {
+  display: flex;
+  margin-top: 12px;
+}
+
+.artifact-content-panel {
+  margin-top: 10px;
+  padding: 12px;
+  overflow: hidden;
+  border: 1px solid var(--dashboard-border);
+  border-radius: 10px;
+  background: rgba(var(--v-theme-on-surface), 0.025);
+}
+
+.artifact-content-alert {
+  margin-bottom: 10px;
+}
+
+.artifact-error-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.artifact-content {
+  max-height: 460px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border-radius: 8px;
+  background: rgba(var(--v-theme-on-surface), 0.04);
+  color: var(--dashboard-text);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .json-block {

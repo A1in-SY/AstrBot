@@ -7,14 +7,14 @@ from typing import Final
 
 from astrbot import __version__
 
-A1IN_RELEASE: Final = "a1in-v4.26.8.5"
-A1IN_RELEASE_REVISION: Final = 5
+A1IN_RELEASE: Final = "a1in-v4.26.8.6"
+A1IN_RELEASE_REVISION: Final = 6
 A1IN_UPSTREAM_BASE_TAG: Final = f"v{__version__}"
 A1IN_SOURCE_REVISION_ENV: Final = "A1IN_SOURCE_REVISION"
 A1IN_ALLOW_OFFICIAL_UPDATES_ENV: Final = "A1IN_ALLOW_OFFICIAL_UPDATES"
 A1IN_OFFICIAL_UPDATES_DISABLED_MESSAGE: Final = (
     "This A1in-managed AstrBot release does not install official AstrBot updates. "
-    "Deploy a verified A1in image digest through the release process instead."
+    "Deploy a verified A1in image through the release process instead."
 )
 
 

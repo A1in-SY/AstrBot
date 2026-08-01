@@ -1,4 +1,6 @@
 import copy
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -1153,6 +1155,66 @@ async def test_v1_execution_trace_list_exposes_generic_summary_and_root_filters(
         assert items[0]["artifact_count"] == 1
         assert items[0]["link_count"] == 1
         assert items[0]["active_span_operation"] is None
+    finally:
+        await trace_service.close()
+
+
+@pytest.mark.asyncio
+async def test_v1_execution_trace_artifact_body_is_loaded_on_demand(
+    asgi_client: httpx.AsyncClient,
+    fake_core_lifecycle,
+    tmp_path: Path,
+):
+    """Trace details keep references light while the Artifact route returns text."""
+
+    trace_service = TraceService(tmp_path / "trace")
+    await trace_service.initialize()
+    fake_core_lifecycle.trace_service = trace_service
+    try:
+        manifest = {
+            "method": "text_chat",
+            "kwargs": {
+                "contexts": [
+                    {"role": "system", "content": "rules " * 1500},
+                    {"role": "user", "content": "hello"},
+                ]
+            },
+        }
+        with trace_service.start_root("agent.run", kind="agent") as root:
+            content_hash = root.record_json("provider.request", manifest)
+            trace_id = root.trace_id
+        assert content_hash is not None
+        await trace_service.flush()
+
+        detail_response = await asgi_client.get(
+            f"/api/v1/traces/{trace_id}",
+            headers=_jwt_headers(),
+        )
+        assert detail_response.status_code == 200
+        artifact_ref = detail_response.json()["data"]["artifact_refs"][0]
+        assert artifact_ref["content_hash"] == content_hash
+        assert "content" not in artifact_ref
+
+        artifact_response = await asgi_client.get(
+            f"/api/v1/traces/artifacts/{content_hash}",
+            headers=_jwt_headers(),
+        )
+        assert artifact_response.status_code == 200
+        artifact = artifact_response.json()["data"]
+        assert json.loads(artifact["content"]) == manifest
+        assert hashlib.sha256(artifact["content"].encode()).hexdigest() == content_hash
+        assert artifact["metadata"]["content_hash"] == content_hash
+        assert artifact["metadata"]["media_type"] == "application/json"
+        assert artifact["metadata"]["artifact_status"] == "available"
+        assert artifact["metadata"]["codec"] == "zlib"
+        assert artifact["metadata"]["captured_size"] > 1024
+        assert artifact["metadata"]["truncated"] is False
+
+        missing_response = await asgi_client.get(
+            f"/api/v1/traces/artifacts/{'0' * 64}",
+            headers=_jwt_headers(),
+        )
+        assert missing_response.status_code == 404
     finally:
         await trace_service.close()
 

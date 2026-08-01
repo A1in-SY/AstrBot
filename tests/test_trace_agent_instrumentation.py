@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from astrbot.core.agent.hooks import BaseAgentRunHooks
+from astrbot.core.agent.response import AgentResponse
 from astrbot.core.agent.runners.base import AgentState, BaseAgentRunner
+from astrbot.core.agent.runners.dify.dify_agent_runner import DifyAgentRunner
+from astrbot.core.astr_agent_run_util import run_agent
+from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.pipeline.process_stage.method.agent_sub_stages.third_party import (
+    run_third_party_agent,
+)
 from astrbot.core.trace.agent_instrumentation import instrument_agent_runner
 from astrbot.core.trace.service import TraceService
 
@@ -34,6 +42,45 @@ class _Runner(BaseAgentRunner[Any]):
 
     def done(self) -> bool:
         return self._state in (AgentState.DONE, AgentState.ERROR)
+
+    def get_final_llm_resp(self):
+        return None
+
+
+class _RunAgentEvent:
+    def is_stopped(self) -> bool:
+        return False
+
+    def get_extra(self, key: str):
+        del key
+        return None
+
+    def get_platform_name(self) -> str:
+        return "test"
+
+
+class _StreamingRunner(BaseAgentRunner[Any]):
+    streaming = True
+    req = None
+
+    async def reset(self, run_context, agent_hooks, **kwargs) -> None:
+        del kwargs
+        self.run_context = run_context
+        self.agent_hooks = agent_hooks
+        self._state = AgentState.IDLE
+
+    async def step(self) -> AsyncGenerator[AgentResponse, None]:
+        self._state = AgentState.RUNNING
+        yield AgentResponse(
+            type="streaming_delta",
+            data={"chain": MessageChain().message("partial")},
+        )
+
+    def done(self) -> bool:
+        return False
+
+    def request_stop(self) -> None:
+        return None
 
     def get_final_llm_resp(self):
         return None
@@ -95,6 +142,95 @@ async def test_closed_step_generator_finalizes_the_agent_run(tmp_path):
         run = next(span for span in detail["spans"] if span["operation"] == "agent.run")
         assert run["status"] == "cancelled"
         assert run["outcome"] == "generator_closed"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_closed_run_agent_bridge_finalizes_the_agent_run(tmp_path):
+    """Pipeline-side closure must reach the traced runner step synchronously."""
+
+    service = TraceService(tmp_path / "trace")
+    await service.initialize()
+    try:
+        runner = _StreamingRunner()
+        instrument_agent_runner(runner, service)
+        with service.start_root("message.process"):
+            await runner.reset(
+                SimpleNamespace(context=SimpleNamespace(event=_RunAgentEvent())),
+                BaseAgentRunHooks(),
+            )
+            stream = run_agent(runner)
+            response = await anext(stream)
+            assert response is not None
+            assert response.get_plain_text() == "partial"
+            await stream.aclose()
+        await service.flush()
+
+        trace = (await service.store.list_traces())[0]
+        detail = await service.store.get_trace(trace["trace_id"])
+        run = next(span for span in detail["spans"] if span["operation"] == "agent.run")
+        assert run["status"] == "cancelled"
+        assert run["outcome"] == "generator_closed"
+        assert all(span["status"] != "running" for span in detail["spans"])
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_closed_third_party_bridge_finalizes_run_and_step(tmp_path):
+    """Third-party ``step_until_done`` must close its active ``step``."""
+
+    service = TraceService(tmp_path / "trace")
+    await service.initialize()
+    inner_step_closed = False
+    try:
+        runner = DifyAgentRunner()
+
+        async def fake_reset(run_context, agent_hooks, **kwargs):
+            del kwargs
+            runner.run_context = run_context
+            runner.agent_hooks = agent_hooks
+            runner.streaming = True
+            runner.final_llm_resp = None
+            runner._state = AgentState.IDLE
+
+        async def fake_step():
+            nonlocal inner_step_closed
+            runner._state = AgentState.RUNNING
+            try:
+                yield AgentResponse(
+                    type="streaming_delta",
+                    data={"chain": MessageChain().message("partial")},
+                )
+            finally:
+                inner_step_closed = True
+
+        runner.reset = fake_reset
+        runner.step = fake_step
+        instrument_agent_runner(runner, service)
+        with service.start_root("message.process"):
+            await runner.reset(
+                SimpleNamespace(context=SimpleNamespace(event=_RunAgentEvent())),
+                BaseAgentRunHooks(),
+            )
+            stream = run_third_party_agent(runner)
+            response, is_error = await anext(stream)
+            assert response.get_plain_text() == "partial"
+            assert is_error is False
+            await stream.aclose()
+            assert inner_step_closed is True
+        await service.flush()
+
+        trace = (await service.store.list_traces())[0]
+        detail = await service.store.get_trace(trace["trace_id"])
+        run = next(span for span in detail["spans"] if span["operation"] == "agent.run")
+        step = next(
+            span for span in detail["spans"] if span["operation"] == "agent.step"
+        )
+        assert run["status"] == "cancelled"
+        assert step["status"] == "cancelled"
+        assert all(span["status"] != "running" for span in detail["spans"])
     finally:
         await service.close()
 

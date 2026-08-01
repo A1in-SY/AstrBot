@@ -39,6 +39,10 @@ from astrbot.core.provider.entities import (
 )
 from astrbot.core.star.star_handler import EventType
 from astrbot.core.trace.agent_instrumentation import instrument_agent_runner
+from astrbot.core.utils.async_generator import (
+    close_async_generator,
+    closing_async_generator,
+)
 from astrbot.core.utils.config_number import coerce_int_config
 from astrbot.core.utils.metrics import Metric
 
@@ -69,8 +73,9 @@ async def run_third_party_agent(
     运行第三方 agent runner 并转换响应格式
     类似于 run_agent 函数，但专门处理第三方 agent runner
     """
+    step_responses = runner.step_until_done(max_step=30)  # type: ignore[misc]
     try:
-        async for resp in runner.step_until_done(max_step=30):  # type: ignore[misc]
+        async for resp in step_responses:
             if resp.type == "streaming_delta":
                 if stream_to_general:
                     continue
@@ -90,6 +95,8 @@ async def run_third_party_agent(
                 f"Error Message: {str(e)}"
             )
         yield MessageChain().message(err_msg), True
+    finally:
+        await close_async_generator(step_responses)
 
 
 class _RunnerResultAggregator:
@@ -219,15 +226,17 @@ class ThirdPartyAgentSubStage(Stage):
         async def _stream_runner_chain() -> AsyncGenerator[MessageChain, None]:
             mark_stream_consumed()
             try:
-                async for chain, is_error in run_third_party_agent(
+                runner_responses = run_third_party_agent(
                     runner,
                     stream_to_general=False,
                     custom_error_message=custom_error_message,
-                ):
-                    aggregator.add_chunk(chain, is_error)
-                    if is_error:
-                        event.set_extra(THIRD_PARTY_RUNNER_ERROR_EXTRA_KEY, True)
-                    yield chain
+                )
+                async with closing_async_generator(runner_responses):
+                    async for chain, is_error in runner_responses:
+                        aggregator.add_chunk(chain, is_error)
+                        if is_error:
+                            event.set_extra(THIRD_PARTY_RUNNER_ERROR_EXTRA_KEY, True)
+                        yield chain
             finally:
                 # Streaming runner cleanup must happen after consumer
                 # finishes iterating to avoid tearing down active streams.
@@ -261,15 +270,17 @@ class ThirdPartyAgentSubStage(Stage):
         custom_error_message: str | None,
     ) -> AsyncGenerator[None, None]:
         aggregator = _RunnerResultAggregator()
-        async for chain, is_error in run_third_party_agent(
+        runner_responses = run_third_party_agent(
             runner,
             stream_to_general=stream_to_general,
             custom_error_message=custom_error_message,
-        ):
-            aggregator.add_chunk(chain, is_error)
-            if is_error:
-                event.set_extra(THIRD_PARTY_RUNNER_ERROR_EXTRA_KEY, True)
-            yield
+        )
+        async with closing_async_generator(runner_responses):
+            async for chain, is_error in runner_responses:
+                aggregator.add_chunk(chain, is_error)
+                if is_error:
+                    event.set_extra(THIRD_PARTY_RUNNER_ERROR_EXTRA_KEY, True)
+                yield
 
         final_chain, is_runner_error = aggregator.finalize(runner.get_final_llm_resp())
         event.set_extra(THIRD_PARTY_RUNNER_ERROR_EXTRA_KEY, is_runner_error)
@@ -400,21 +411,22 @@ class ThirdPartyAgentSubStage(Stage):
                     is_stream_consumed=lambda: stream_consumed,
                     close_runner_once=close_runner_once,
                 )
-                async for _ in self._handle_streaming_response(
+                stage_responses = self._handle_streaming_response(
                     runner=runner,
                     event=event,
                     custom_error_message=custom_error_message,
                     close_runner_once=close_runner_once,
                     mark_stream_consumed=mark_stream_consumed,
-                ):
-                    yield
+                )
             else:
-                async for _ in self._handle_non_streaming_response(
+                stage_responses = self._handle_non_streaming_response(
                     runner=runner,
                     event=event,
                     stream_to_general=stream_to_general,
                     custom_error_message=custom_error_message,
-                ):
+                )
+            async with closing_async_generator(stage_responses):
+                async for _ in stage_responses:
                     yield
         finally:
             if (

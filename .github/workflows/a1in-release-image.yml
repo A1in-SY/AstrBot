@@ -1,21 +1,26 @@
 name: Build A1in AstrBot Release Image
 
 on:
-  push:
-    tags:
-      - "a1in-v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Annotated A1in Git tag to build (for example, a1in-v4.26.8.6)
+        required: true
+        type: string
+
+run-name: Build A1in ${{ inputs.release_tag }}
 
 permissions:
   contents: read
   packages: write
 
 concurrency:
-  group: a1in-release-image-${{ github.ref }}
+  group: a1in-release-image-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 jobs:
   build:
-    if: github.repository == 'A1in-SY/AstrBot'
+    if: github.repository == 'A1in-SY/AstrBot' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
 
     steps:
@@ -23,12 +28,15 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: refs/tags/${{ inputs.release_tag }}
 
       - name: Validate release metadata
         id: metadata
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          release_tag="${GITHUB_REF_NAME}"
+          release_tag="${RELEASE_TAG}"
           if [[ ! "$release_tag" =~ ^a1in-v([0-9]+\.[0-9]+\.[0-9]+)\.([0-9]+)$ ]]; then
             echo "Expected tag format a1in-v<major>.<minor>.<patch>.<revision>; got: $release_tag" >&2
             exit 1
@@ -43,6 +51,16 @@ jobs:
           fi
           if ! git merge-base --is-ancestor "$upstream_base_tag" HEAD; then
             echo "Release commit does not descend from $upstream_base_tag" >&2
+            exit 1
+          fi
+          if [[ "$(git cat-file -t "refs/tags/$release_tag")" != "tag" ]]; then
+            echo "Release ref must be an annotated tag: $release_tag" >&2
+            exit 1
+          fi
+          tag_commit="$(git rev-list -n 1 "refs/tags/$release_tag")"
+          head_commit="$(git rev-parse HEAD)"
+          if [[ "$tag_commit" != "$head_commit" ]]; then
+            echo "Checked out commit does not match release tag: $tag_commit != $head_commit" >&2
             exit 1
           fi
           python3 - "$release_tag" "$upstream_base_tag" "$release_revision" <<'PY'

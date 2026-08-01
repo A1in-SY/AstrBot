@@ -51,6 +51,32 @@ class _MalformedStreamingErrorRunner(_StreamingErrorRunner):
         yield AgentResponse(type="err", data={})
 
 
+class _ClosableStreamingRunner:
+    """Runner exposing whether consumer-side close reaches ``step()``."""
+
+    streaming = True
+    req = None
+
+    def __init__(self) -> None:
+        self.step_closed = False
+        self.run_context = SimpleNamespace(context=SimpleNamespace(event=_FakeEvent()))
+
+    async def step(self):
+        try:
+            yield AgentResponse(
+                type="streaming_delta",
+                data={"chain": MessageChain().message("partial")},
+            )
+        finally:
+            self.step_closed = True
+
+    def done(self) -> bool:
+        return False
+
+    def request_stop(self) -> None:
+        return None
+
+
 @pytest.mark.asyncio
 async def test_run_agent_forwards_streaming_provider_error():
     error_text = (
@@ -72,3 +98,16 @@ async def test_run_agent_replaces_malformed_streaming_provider_error():
 
     assert len(chains) == 1
     assert chains[0].get_plain_text() == "Error occurred during AI execution."
+
+
+@pytest.mark.asyncio
+async def test_run_agent_close_reaches_runner_step():
+    runner = _ClosableStreamingRunner()
+    stream = run_agent(runner)
+
+    chain = await anext(stream)
+    assert chain is not None
+    assert chain.get_plain_text() == "partial"
+    await stream.aclose()
+
+    assert runner.step_closed is True

@@ -568,11 +568,11 @@ onBeforeUnmount(() => {
             @click="openTrace(trace)"
             @keydown.enter.self="openTrace(trace)"
           >
-            <div class="trace-time">
+            <div class="trace-time" :data-label="tm('table.time')">
               <strong>{{ formatDateTime(trace.started_at) }}</strong>
               <span>{{ tm('table.ended') }} {{ formatDateTime(trace.ended_at) }}</span>
             </div>
-            <div class="trace-identity">
+            <div class="trace-identity" :data-label="tm('table.trace')">
               <code :title="trace.trace_id">{{ trace.trace_id }}</code>
               <div v-if="traceContext(trace).length" class="trace-context">
                 <span v-for="entry in traceContext(trace)" :key="entry.key" :title="`${entry.label}: ${entry.value}`">
@@ -580,18 +580,18 @@ onBeforeUnmount(() => {
                 </span>
               </div>
             </div>
-            <div class="trace-source">
+            <div class="trace-source" :data-label="tm('table.source')">
               <strong>{{ trace.source || '–' }}</strong>
               <span>{{ trace.kind || '–' }}</span>
               <span v-if="trace.plugin_id" class="mono">{{ trace.plugin_id }}</span>
             </div>
-            <div class="trace-operation">
+            <div class="trace-operation" :data-label="tm('table.operation')">
               <strong :title="trace.operation">{{ trace.operation }}</strong>
               <span :title="trace.active_span_operation || undefined">
                 {{ trace.active_span_operation || tm('table.noActiveOperation') }}
               </span>
             </div>
-            <div class="trace-state">
+            <div class="trace-state" :data-label="tm('table.status')">
               <div>
                 <v-chip :color="executionTraceStatusColor(trace.status)" size="x-small" variant="tonal">
                   {{ trace.status }}
@@ -602,7 +602,7 @@ onBeforeUnmount(() => {
               </div>
               <span v-if="trace.outcome">{{ trace.outcome }}</span>
             </div>
-            <div class="trace-metrics">
+            <div class="trace-metrics" :data-label="tm('table.metrics')">
               <strong>{{ formatExecutionTraceDuration(executionTraceDuration(trace, currentSeconds)) }}</strong>
               <span>
                 {{ tm('table.counts', {
@@ -613,7 +613,7 @@ onBeforeUnmount(() => {
                 }) }}
               </span>
             </div>
-            <div class="trace-row-actions">
+            <div class="trace-row-actions" :data-label="tm('table.actions')">
               <v-btn color="primary" size="small" variant="text" @click.stop="openTrace(trace)">
                 {{ tm('actions.view') }}
               </v-btn>
@@ -749,6 +749,7 @@ onBeforeUnmount(() => {
 .trace-table-card {
   min-width: 0;
   overflow: hidden;
+  container-type: inline-size;
 }
 
 .trace-table-heading {
@@ -767,15 +768,24 @@ onBeforeUnmount(() => {
 }
 
 .trace-table-wrap {
+  width: 100%;
   min-width: 0;
-  overflow-x: auto;
+  overflow: hidden;
 }
 
 .trace-table-head,
 .trace-row {
   display: grid;
-  min-width: 1250px;
-  grid-template-columns: 178px minmax(180px, 1.3fr) 145px minmax(155px, 1fr) 130px 170px 110px;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns:
+    minmax(0, 1.25fr)
+    minmax(0, 1.35fr)
+    minmax(0, 0.8fr)
+    minmax(0, 1fr)
+    minmax(0, 0.8fr)
+    minmax(0, 0.95fr)
+    110px;
   gap: 14px;
 }
 
@@ -903,6 +913,62 @@ onBeforeUnmount(() => {
 @media (max-width: 920px) {
   .trace-filters {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container (max-width: 1080px) {
+  .trace-table-head {
+    display: none;
+  }
+
+  .trace-table-wrap {
+    display: grid;
+    gap: 12px;
+    padding: 12px;
+  }
+
+  .trace-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) 110px;
+    gap: 14px 18px;
+    padding: 16px;
+    border: 1px solid var(--dashboard-border);
+    border-radius: 12px;
+  }
+
+  .trace-row > div::before {
+    display: block;
+    margin-bottom: 5px;
+    color: var(--dashboard-subtle);
+    content: attr(data-label);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+  }
+
+  .trace-row-actions {
+    grid-column: 3;
+    grid-row: 1 / span 3;
+    align-self: stretch;
+    justify-content: flex-start;
+    flex-direction: column;
+  }
+}
+
+@container (max-width: 720px) {
+  .trace-table-wrap {
+    padding: 10px;
+  }
+
+  .trace-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .trace-row-actions {
+    grid-column: auto;
+    grid-row: auto;
+    align-items: center;
+    justify-content: flex-start;
+    flex-direction: row;
   }
 }
 

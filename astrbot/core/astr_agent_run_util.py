@@ -23,6 +23,10 @@ from astrbot.core.provider.entities import LLMResponse
 from astrbot.core.provider.provider import TTSProvider
 from astrbot.core.trace.context import current_trace_service
 from astrbot.core.trace.service import NoopTraceSpan, TraceSpan
+from astrbot.core.utils.async_generator import (
+    close_async_generator,
+    closing_async_generator,
+)
 
 AgentRunner = ToolLoopAgentRunner[AstrAgentContext]
 
@@ -156,8 +160,9 @@ async def run_agent(
         stop_watcher = asyncio.create_task(
             _watch_agent_stop_signal(agent_runner, astr_event),
         )
+        step_responses = agent_runner.step()
         try:
-            async for resp in agent_runner.step():
+            async for resp in step_responses:
                 if _should_stop_agent(astr_event):
                     agent_runner.request_stop()
 
@@ -344,6 +349,14 @@ async def run_agent(
             else:
                 astr_event.set_result(MessageEventResult().message(err_msg))
             return
+        finally:
+            if not stop_watcher.done():
+                stop_watcher.cancel()
+                try:
+                    await stop_watcher
+                except asyncio.CancelledError:
+                    pass
+            await close_async_generator(step_responses)
 
 
 async def _watch_agent_stop_signal(agent_runner: AgentRunner, astr_event) -> None:
@@ -378,7 +391,7 @@ async def run_live_agent(
     """
     # 如果没有 TTS Provider，直接发送文本
     if not tts_provider:
-        async for chain in run_agent(
+        agent_responses = run_agent(
             agent_runner,
             max_step=max_step,
             show_tool_use=show_tool_use,
@@ -386,8 +399,10 @@ async def run_live_agent(
             stream_to_general=False,
             show_reasoning=show_reasoning,
             buffer_intermediate_messages=buffer_intermediate_messages,
-        ):
-            yield chain
+        )
+        async with closing_async_generator(agent_responses):
+            async for chain in agent_responses:
+                yield chain
         return
 
     support_stream = tts_provider.support_stream()
@@ -574,46 +589,50 @@ async def _run_agent_feeder(
 ) -> None:
     """运行 Agent 并将文本输出分句放入队列"""
     buffer = ""
+    agent_responses = run_agent(
+        agent_runner,
+        max_step=max_step,
+        show_tool_use=show_tool_use,
+        show_tool_call_result=show_tool_call_result,
+        stream_to_general=False,
+        show_reasoning=show_reasoning,
+        buffer_intermediate_messages=buffer_intermediate_messages,
+    )
     try:
-        async for chain in run_agent(
-            agent_runner,
-            max_step=max_step,
-            show_tool_use=show_tool_use,
-            show_tool_call_result=show_tool_call_result,
-            stream_to_general=False,
-            show_reasoning=show_reasoning,
-            buffer_intermediate_messages=buffer_intermediate_messages,
-        ):
-            if chain is None:
-                continue
+        async with closing_async_generator(agent_responses):
+            async for chain in agent_responses:
+                if chain is None:
+                    continue
 
-            # 提取文本
-            text = chain.get_plain_text()
-            if text:
-                buffer += text
+                # 提取文本
+                text = chain.get_plain_text()
+                if text:
+                    buffer += text
 
-                # 分句逻辑：匹配标点符号
-                # r"([.。!！?？\n]+)" 会保留分隔符
-                parts = re.split(r"([.。!！?？\n]+)", buffer)
+                    # 分句逻辑：匹配标点符号
+                    # r"([.。!！?？\n]+)" 会保留分隔符
+                    parts = re.split(r"([.。!！?？\n]+)", buffer)
 
-                if len(parts) > 1:
-                    # 处理完整的句子
-                    # range step 2 因为 split 后是 [text, delim, text, delim, ...]
-                    temp_buffer = ""
-                    for i in range(0, len(parts) - 1, 2):
-                        sentence = parts[i]
-                        delim = parts[i + 1]
-                        full_sentence = sentence + delim
-                        temp_buffer += full_sentence
+                    if len(parts) > 1:
+                        # 处理完整的句子
+                        # range step 2 因为 split 后是 [text, delim, text, delim, ...]
+                        temp_buffer = ""
+                        for i in range(0, len(parts) - 1, 2):
+                            sentence = parts[i]
+                            delim = parts[i + 1]
+                            full_sentence = sentence + delim
+                            temp_buffer += full_sentence
 
-                        if len(temp_buffer) >= 10:
-                            if temp_buffer.strip():
-                                logger.info(f"[Live Agent Feeder] 分句: {temp_buffer}")
-                                await text_queue.put(temp_buffer)
-                            temp_buffer = ""
+                            if len(temp_buffer) >= 10:
+                                if temp_buffer.strip():
+                                    logger.info(
+                                        f"[Live Agent Feeder] 分句: {temp_buffer}"
+                                    )
+                                    await text_queue.put(temp_buffer)
+                                temp_buffer = ""
 
-                    # 更新 buffer 为剩余部分
-                    buffer = temp_buffer + parts[-1]
+                        # 更新 buffer 为剩余部分
+                        buffer = temp_buffer + parts[-1]
 
         # 处理剩余 buffer
         if buffer.strip():

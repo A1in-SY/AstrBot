@@ -54,6 +54,7 @@ from astrbot.core.trace.serialization import (
     normalize_trace_value,
 )
 from astrbot.core.trace.service import NoopTraceSpan
+from astrbot.core.utils.async_generator import closing_async_generator
 
 from ..context.compressor import ContextCompressor
 from ..context.config import ContextConfig
@@ -1130,8 +1131,10 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         step_count = 0
         while not self.done() and step_count < max_step:
             step_count += 1
-            async for resp in self.step():
-                yield resp
+            step_responses = self.step()
+            async with closing_async_generator(step_responses):
+                async for resp in step_responses:
+                    yield resp
 
         #  如果循环结束了但是 agent 还没有完成，说明是达到了 max_step
         if not self.done():
@@ -1150,8 +1153,10 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             )
             # 再执行最后一步
             self._astrbot_trace_step_kind = "forced_final"
-            async for resp in self.step():
-                yield resp
+            step_responses = self.step()
+            async with closing_async_generator(step_responses):
+                async for resp in step_responses:
+                    yield resp
 
     async def _handle_function_tools(
         self,

@@ -35,6 +35,7 @@ from astrbot.core.provider.entities import (
     ProviderRequest,
 )
 from astrbot.core.star.star_handler import EventType
+from astrbot.core.utils.async_generator import closing_async_generator
 from astrbot.core.utils.metrics import Metric
 from astrbot.core.utils.session_lock import session_lock_manager
 
@@ -366,7 +367,7 @@ class InternalAgentSubStage(Stage):
                                     ),
                                 )
                     else:
-                        async for _ in run_agent(
+                        agent_responses = run_agent(
                             agent_runner,
                             self.max_step,
                             self.show_tool_use,
@@ -374,8 +375,10 @@ class InternalAgentSubStage(Stage):
                             stream_to_general,
                             show_reasoning=self.show_reasoning,
                             buffer_intermediate_messages=self.buffer_intermediate_messages,
-                        ):
-                            yield
+                        )
+                        async with closing_async_generator(agent_responses):
+                            async for _ in agent_responses:
+                                yield
 
                     final_resp = agent_runner.get_final_llm_resp()
 

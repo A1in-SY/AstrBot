@@ -3,6 +3,7 @@ from collections.abc import AsyncGenerator
 from astrbot.core import logger
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.star.session_llm_manager import SessionServiceManager
+from astrbot.core.utils.async_generator import closing_async_generator
 
 from ...context import PipelineContext
 from ..stage import Stage
@@ -46,5 +47,7 @@ class AgentRequestSubStage(Stage):
             )
             return
 
-        async for resp in self.agent_sub_stage.process(event, self.prov_wake_prefix):
-            yield resp
+        agent_responses = self.agent_sub_stage.process(event, self.prov_wake_prefix)
+        async with closing_async_generator(agent_responses):
+            async for resp in agent_responses:
+                yield resp

@@ -8,6 +8,7 @@ from astrbot.core.platform.sources.wecom_ai_bot.wecomai_event import (
     WecomAIBotMessageEvent,
 )
 from astrbot.core.utils.active_event_registry import active_event_registry
+from astrbot.core.utils.async_generator import closing_async_generator
 
 from .bootstrap import ensure_builtin_stages_registered
 from .context import PipelineContext
@@ -50,23 +51,24 @@ class PipelineScheduler:
 
             if isinstance(coroutine, AsyncGenerator):
                 # 如果返回的是异步生成器, 实现洋葱模型的核心
-                async for _ in coroutine:
-                    # 此处是前置处理完成后的暂停点(yield), 下面开始执行后续阶段
-                    if event.is_stopped():
-                        logger.debug(
-                            f"Stage {stage.__class__.__name__} stopped event propagation.",
-                        )
-                        break
+                async with closing_async_generator(coroutine):
+                    async for _ in coroutine:
+                        # 此处是前置处理完成后的暂停点(yield), 下面开始执行后续阶段
+                        if event.is_stopped():
+                            logger.debug(
+                                f"Stage {stage.__class__.__name__} stopped event propagation.",
+                            )
+                            break
 
-                    # 递归调用, 处理所有后续阶段
-                    await self._process_stages(event, i + 1)
+                        # 递归调用, 处理所有后续阶段
+                        await self._process_stages(event, i + 1)
 
-                    # 此处是后续所有阶段处理完毕后返回的点, 执行后置处理
-                    if event.is_stopped():
-                        logger.debug(
-                            f"Stage {stage.__class__.__name__} stopped event propagation.",
-                        )
-                        break
+                        # 此处是后续所有阶段处理完毕后返回的点, 执行后置处理
+                        if event.is_stopped():
+                            logger.debug(
+                                f"Stage {stage.__class__.__name__} stopped event propagation.",
+                            )
+                            break
             else:
                 # 如果返回的是普通协程(不含yield的async函数), 则不进入下一层(基线条件)
                 # 简单地等待它执行完成, 然后继续执行下一个阶段
