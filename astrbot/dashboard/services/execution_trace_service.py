@@ -40,6 +40,7 @@ class ExecutionTraceService:
         before_ended_at: float | None,
         before_trace_id: str | None,
         status: str | None,
+        category: str | None,
         operation: str | None,
         source: str | None,
         kind: str | None,
@@ -53,12 +54,18 @@ class ExecutionTraceService:
             before_ended_at=before_ended_at,
             before_trace_id=before_trace_id,
             status=status,
+            category=category,
             operation=operation,
             source=source,
             kind=kind,
             plugin_id=plugin_id,
             degraded=degraded,
         )
+
+    async def get_filter_options(self) -> dict[str, Any]:
+        """Return data-driven Trace filter facets for the WebUI."""
+
+        return await self._trace_service().store.get_filter_options()
 
     async def get_trace(self, trace_id: str) -> dict[str, Any]:
         """Return one Trace tree without eagerly loading Artifact bodies."""

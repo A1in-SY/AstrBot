@@ -69,6 +69,19 @@ async def get_trace_config(
         _raise_trace_error(exc)
 
 
+@router.get("/traces/filter-options")
+async def get_trace_filter_options(
+    _auth: AuthContext = Depends(require_system_scope),
+    service: ExecutionTraceService = Depends(get_service),
+):
+    """Return data-driven Trace filter facets for the WebUI list."""
+
+    try:
+        return ok(await service.get_filter_options())
+    except Exception as exc:
+        _raise_trace_error(exc)
+
+
 @router.put("/traces/config")
 async def update_trace_config(
     payload: ExecutionTraceConfigRequest,
@@ -89,6 +102,7 @@ async def list_traces(
     before_ended_at: float | None = Query(default=None),
     before_trace_id: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    category: str | None = Query(default=None),
     operation: str | None = Query(default=None),
     source: str | None = Query(default=None),
     kind: str | None = Query(default=None),
@@ -105,6 +119,7 @@ async def list_traces(
             before_ended_at=before_ended_at,
             before_trace_id=before_trace_id,
             status=status,
+            category=category,
             operation=operation,
             source=source,
             kind=kind,

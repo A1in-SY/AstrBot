@@ -3584,10 +3584,15 @@ export type UpdateExecutionTraceConfigResponse = (SuccessEnvelope);
 
 export type UpdateExecutionTraceConfigError = unknown;
 
+export type GetExecutionTraceFilterOptionsResponse = (SuccessEnvelope);
+
+export type GetExecutionTraceFilterOptionsError = unknown;
+
 export type ListExecutionTracesData = {
     query?: {
         before_ended_at?: number;
         before_trace_id?: string;
+        category?: string;
         degraded?: boolean;
         kind?: string;
         limit?: number;

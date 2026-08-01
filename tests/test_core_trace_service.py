@@ -142,6 +142,73 @@ async def test_explicit_plugin_root_binds_plugin_identity_and_context(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_trace_category_filter_and_filter_options(tmp_path):
+    """The category filter and filter options classify Trace roots consistently."""
+
+    service = TraceService(tmp_path / "trace")
+    await service.initialize()
+    plugin_tracer = PluginTracer(service, "a1in/group-summary")
+    try:
+        with service.start_root("message.process", kind="pipeline"):
+            pass
+        with service.start_root("agent.run", kind="agent"):
+            pass
+        with service.start_root(
+            "agent.run",
+            kind="agent",
+            attributes={
+                "trigger_reason": "cron",
+                "cron_job": {"id": "job-1", "name": "daily"},
+            },
+        ):
+            pass
+        with service.start_root("tool.background.run", kind="tool"):
+            pass
+        with service.start_root("model.call", kind="provider"):
+            pass
+        with service.start_root("response.deliver", kind="delivery"):
+            pass
+        with plugin_tracer.start_root("group_summary.run"):
+            pass
+        with service.start_root("conversation.history.persist", kind="storage"):
+            pass
+        await service.flush()
+
+        store = service.store
+        assert len(await store.list_traces()) == 8
+        expected = [
+            ("message_pipeline", "message.process"),
+            ("agent", "agent.run"),
+            ("scheduled", "agent.run"),
+            ("tool", "tool.background.run"),
+            ("provider", "model.call"),
+            ("delivery", "response.deliver"),
+            ("plugin", "group_summary.run"),
+            ("other", "conversation.history.persist"),
+        ]
+        for category, operation in expected:
+            items = await store.list_traces(category=category)
+            assert len(items) == 1
+            assert items[0]["operation"] == operation
+
+        options = await store.get_filter_options()
+        assert {item["key"] for item in options["categories"]} == {
+            "message_pipeline",
+            "agent",
+            "scheduled",
+            "tool",
+            "provider",
+            "delivery",
+            "plugin",
+            "other",
+        }
+        assert sum(item["count"] for item in options["categories"]) == 8
+        assert options["plugins"] == [{"plugin_id": "a1in/group-summary", "count": 1}]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_artifact_content_is_deduplicated_by_canonical_content(tmp_path):
     """Repeated text references should use one immutable artifact object."""
 

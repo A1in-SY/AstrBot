@@ -269,7 +269,7 @@ onBeforeUnmount(() => {
           >
             {{ tm('actions.backToOverview') }}
           </v-btn>
-          <h1 class="dashboard-title">{{ trace?.operation || tm('detail.title') }}</h1>
+          <h1 class="dashboard-title">{{ tm('detail.title') }}</h1>
           <p class="dashboard-subtitle trace-id" :title="traceId">{{ traceId }}</p>
         </div>
         <div class="dashboard-header-actions">

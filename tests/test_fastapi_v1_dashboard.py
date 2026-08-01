@@ -1160,6 +1160,57 @@ async def test_v1_execution_trace_list_exposes_generic_summary_and_root_filters(
 
 
 @pytest.mark.asyncio
+async def test_v1_execution_trace_category_filter_and_filter_options(
+    asgi_client: httpx.AsyncClient,
+    fake_core_lifecycle,
+    tmp_path: Path,
+):
+    """The category query and filter-options endpoint classify roots consistently."""
+
+    trace_service = TraceService(tmp_path / "trace")
+    await trace_service.initialize()
+    fake_core_lifecycle.trace_service = trace_service
+    try:
+        plugin_tracer = PluginTracer(trace_service, "a1in/group-summary")
+        with plugin_tracer.start_root("group_summary.run"):
+            pass
+        with trace_service.start_root("agent.run", kind="agent"):
+            pass
+        with trace_service.start_root(
+            "agent.run",
+            kind="agent",
+            attributes={
+                "trigger_reason": "cron",
+                "cron_job": {"id": "job-1", "name": "daily"},
+            },
+        ):
+            pass
+        await trace_service.flush()
+
+        options_response = await asgi_client.get(
+            "/api/v1/traces/filter-options",
+            headers=_jwt_headers(),
+        )
+        assert options_response.status_code == 200
+        options = options_response.json()["data"]
+        categories = {item["key"]: item["count"] for item in options["categories"]}
+        assert categories == {"plugin": 1, "agent": 1, "scheduled": 1}
+        assert options["plugins"] == [{"plugin_id": "a1in/group-summary", "count": 1}]
+
+        scheduled_response = await asgi_client.get(
+            "/api/v1/traces",
+            headers=_jwt_headers(),
+            params={"category": "scheduled"},
+        )
+        assert scheduled_response.status_code == 200
+        items = scheduled_response.json()["data"]["items"]
+        assert len(items) == 1
+        assert items[0]["attributes"]["cron_job"]["name"] == "daily"
+    finally:
+        await trace_service.close()
+
+
+@pytest.mark.asyncio
 async def test_v1_execution_trace_artifact_body_is_loaded_on_demand(
     asgi_client: httpx.AsyncClient,
     fake_core_lifecycle,

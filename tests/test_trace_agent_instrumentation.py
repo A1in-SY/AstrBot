@@ -122,6 +122,35 @@ async def test_runner_reset_is_lazy_and_steps_share_one_agent_run(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_runner_extra_attributes_land_on_agent_run_root(tmp_path):
+    """Trigger attributes passed at instrumentation time enrich the run root."""
+
+    service = TraceService(tmp_path / "trace")
+    await service.initialize()
+    try:
+        runner = _Runner()
+        instrument_agent_runner(
+            runner,
+            service,
+            attributes={
+                "trigger_reason": "cron",
+                "cron_job": {"id": "job-1", "name": "daily"},
+            },
+        )
+        await runner.reset(None, BaseAgentRunHooks())
+        assert [item async for item in runner.step()] == ["step-1"]
+        assert [item async for item in runner.step()] == ["step-2"]
+        await service.flush()
+
+        trace = (await service.store.list_traces())[0]
+        assert trace["operation"] == "agent.run"
+        assert trace["attributes"]["trigger_reason"] == "cron"
+        assert trace["attributes"]["cron_job"]["name"] == "daily"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_closed_step_generator_finalizes_the_agent_run(tmp_path):
     """Consumer-side generator closure must not leave a running agent span behind."""
 

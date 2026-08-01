@@ -10,6 +10,7 @@ import zoneinfo
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from astrbot.core import logger
 from astrbot.core.agent.handoff import HandoffTool
@@ -1577,7 +1578,21 @@ async def build_main_agent(
         _apply_local_env_tools(req, plugin_context)
 
     agent_runner = AgentRunner()
-    instrument_agent_runner(agent_runner, plugin_context.trace_service)
+    trace_attributes: dict[str, Any] | None = None
+    cron_job = event.get_extra("cron_job")
+    if isinstance(cron_job, dict) and cron_job:
+        trace_attributes = {
+            "trigger_reason": "cron",
+            "cron_job": {
+                "id": cron_job.get("id"),
+                "name": cron_job.get("name"),
+            },
+        }
+    instrument_agent_runner(
+        agent_runner,
+        plugin_context.trace_service,
+        attributes=trace_attributes,
+    )
     astr_agent_ctx = AstrAgentContext(
         context=plugin_context,
         event=event,
