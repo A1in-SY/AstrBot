@@ -4,7 +4,6 @@ from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import StreamingResponse
 
 from astrbot.dashboard.responses import ApiError, ok
-from astrbot.dashboard.schemas import TraceSettingsRequest
 from astrbot.dashboard.services.log_service import LogService, LogServiceError
 
 from .auth import AuthContext, require_dashboard_user, require_scope
@@ -48,21 +47,6 @@ def _get_log_history(service: LogService):
         _raise_log_error(exc)
 
 
-def _get_trace_settings(service: LogService):
-    try:
-        return ok(service.get_trace_settings())
-    except LogServiceError as exc:
-        _raise_log_error(exc)
-
-
-def _update_trace_settings(payload: TraceSettingsRequest, service: LogService):
-    try:
-        message = service.update_trace_settings(payload.model_dump(exclude_none=True))
-        return ok(message=message)
-    except LogServiceError as exc:
-        _raise_log_error(exc)
-
-
 @router.get("/logs/history")
 async def get_log_history(
     _auth: AuthContext = Depends(require_system_scope),
@@ -80,23 +64,6 @@ async def live_logs(
     return _log_stream_response(last_event_id, service)
 
 
-@router.get("/trace/settings")
-async def get_trace_settings(
-    _auth: AuthContext = Depends(require_system_scope),
-    service: LogService = Depends(get_service),
-):
-    return _get_trace_settings(service)
-
-
-@router.put("/trace/settings")
-async def update_trace_settings(
-    payload: TraceSettingsRequest,
-    _auth: AuthContext = Depends(require_system_scope),
-    service: LogService = Depends(get_service),
-):
-    return _update_trace_settings(payload, service)
-
-
 @legacy_router.get("/log-history")
 async def get_dashboard_log_history(
     _username: str = Depends(require_dashboard_user),
@@ -112,20 +79,3 @@ async def get_dashboard_live_logs(
     service: LogService = Depends(get_service),
 ):
     return _log_stream_response(last_event_id, service)
-
-
-@legacy_router.get("/trace/settings")
-async def get_dashboard_trace_settings(
-    _username: str = Depends(require_dashboard_user),
-    service: LogService = Depends(get_service),
-):
-    return _get_trace_settings(service)
-
-
-@legacy_router.post("/trace/settings")
-async def update_dashboard_trace_settings(
-    payload: TraceSettingsRequest,
-    _username: str = Depends(require_dashboard_user),
-    service: LogService = Depends(get_service),
-):
-    return _update_trace_settings(payload, service)

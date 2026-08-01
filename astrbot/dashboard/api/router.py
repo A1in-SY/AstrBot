@@ -27,6 +27,7 @@ from .stats import router as stats_router
 from .subagents import router as subagents_router
 from .t2i import router as t2i_router
 from .tools import router as tools_router
+from .traces import router as traces_router
 from .updates import router as updates_router
 
 API_V1_PREFIX = "/api/v1"
@@ -52,6 +53,7 @@ def build_api_router() -> APIRouter:
     router.include_router(sessions_router)
     router.include_router(subagents_router)
     router.include_router(logs_router)
+    router.include_router(traces_router)
     router.include_router(stats_router)
     router.include_router(tools_router)
     router.include_router(platform_router)

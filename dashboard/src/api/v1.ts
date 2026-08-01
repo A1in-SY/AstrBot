@@ -31,6 +31,7 @@ import {
   type CronJobRequest,
   type DynamicConfig,
   type EnabledPatch,
+  type ExecutionTraceConfigRequest,
   type GhproxyTestRequest,
   type KnowledgeBaseCreateRequest,
   type KnowledgeBaseRequest,
@@ -52,7 +53,6 @@ import {
   type SuccessEnvelope,
   type T2iTemplateRequest,
   type TotpSetupRequest,
-  type TraceSettingsRequest,
   type UpdateAccountRequest,
   type UpdateRequest,
 } from './generated/openapi-v1';
@@ -198,6 +198,106 @@ export interface ChatSessionListParams {
 
 export interface CronJobListParams {
   type?: string;
+}
+
+export interface ExecutionTraceSummary {
+  trace_id: string;
+  root_span_id: string;
+  operation: string;
+  kind: string;
+  source: string;
+  plugin_id?: string | null;
+  started_at: number;
+  ended_at?: number | null;
+  status: string;
+  outcome?: string | null;
+  degraded: boolean;
+  degradation_reasons?: string[];
+  attributes?: Record<string, unknown>;
+  dropped?: Record<string, number>;
+}
+
+export interface ExecutionTraceSpan {
+  trace_id: string;
+  span_id: string;
+  parent_span_id?: string | null;
+  operation: string;
+  kind: string;
+  source: string;
+  plugin_id?: string | null;
+  started_at: number;
+  ended_at?: number | null;
+  status: string;
+  outcome?: string | null;
+  degraded: boolean;
+  degradation_reasons?: string[];
+  attributes?: Record<string, unknown>;
+}
+
+export interface ExecutionTraceEvent {
+  span_id: string;
+  event_index: number;
+  name: string;
+  occurred_at: number;
+  attributes?: Record<string, unknown>;
+}
+
+export interface ExecutionTraceArtifactRef {
+  span_id: string;
+  ref_index: number;
+  content_hash: string;
+  role: string;
+  media_type?: string;
+  logical_size?: number;
+  captured_size?: number;
+  truncated?: boolean;
+  metadata?: Record<string, unknown>;
+  artifact_status?: string;
+}
+
+export interface ExecutionTraceLink {
+  span_id: string;
+  link_index: number;
+  relation: string;
+  target_trace_id?: string | null;
+  target_span_id?: string | null;
+  attributes?: Record<string, unknown>;
+}
+
+export interface ExecutionTraceDetail {
+  trace: ExecutionTraceSummary;
+  spans: ExecutionTraceSpan[];
+  events: ExecutionTraceEvent[];
+  artifact_refs: ExecutionTraceArtifactRef[];
+  links: ExecutionTraceLink[];
+}
+
+export interface ExecutionTraceOverview {
+  traces_24h: number;
+  running: number;
+  errors_24h: number;
+  physical_size: number;
+}
+
+export interface ExecutionTraceConfig {
+  enabled: boolean;
+  runtime_available: boolean;
+}
+
+export interface ExecutionTraceListParams {
+  [key: string]: unknown;
+  limit?: number;
+  before_ended_at?: number;
+  before_trace_id?: string;
+  status?: string;
+  operation?: string;
+  plugin_id?: string;
+  degraded?: boolean;
+}
+
+export interface ExecutionTraceArtifact {
+  metadata: Record<string, unknown>;
+  content: string;
 }
 
 type ProviderCapability = NonNullable<ProviderListParams['capability']>;
@@ -683,13 +783,44 @@ export const apiKeyApi = {
   },
 };
 
-export const traceApi = {
-  getSettings() {
-    return typed<OpenConfig>(openApiV1.getTraceSettings());
+export const executionTraceApi = {
+  overview() {
+    return typed<ExecutionTraceOverview>(openApiV1.getExecutionTraceOverview());
   },
-  updateSettings(settings: TraceSettingsRequest) {
+  config() {
+    return typed<ExecutionTraceConfig>(openApiV1.getExecutionTraceConfig());
+  },
+  updateConfig(payload: ExecutionTraceConfigRequest) {
+    return typed<ExecutionTraceConfig>(
+      openApiV1.updateExecutionTraceConfig({ body: payload }),
+    );
+  },
+  list(params?: ExecutionTraceListParams) {
+    return typed<{ items: ExecutionTraceSummary[] }>(
+      openApiV1.listExecutionTraces({ query: params }),
+    );
+  },
+  detail(traceId: string) {
+    return typed<ExecutionTraceDetail>(
+      openApiV1.getExecutionTrace({ path: { trace_id: traceId } }),
+    );
+  },
+  artifact(contentHash: string) {
+    return typed<ExecutionTraceArtifact>(
+      openApiV1.getExecutionTraceArtifact({ path: { content_hash: contentHash } }),
+    );
+  },
+  remove(traceId: string) {
     return typed<OpenConfig>(
-      openApiV1.updateTraceSettings({ body: settings }),
+      openApiV1.deleteExecutionTrace({ path: { trace_id: traceId } }),
+    );
+  },
+  clear() {
+    return typed<{ deleted: number }>(openApiV1.clearExecutionTraces());
+  },
+  cleanup() {
+    return typed<{ deleted: number; physical_size: number }>(
+      openApiV1.cleanupExecutionTraces(),
     );
   },
 };

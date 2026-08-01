@@ -275,6 +275,10 @@ export type ErrorEnvelope = {
     data?: unknown;
 };
 
+export type ExecutionTraceConfigRequest = {
+    enabled: boolean;
+};
+
 export type FileUploadRequest = {
     file: (Blob | File);
 };
@@ -640,12 +644,6 @@ export type permission = 'admin' | 'member';
 export type TotpSetupRequest = {
     code?: string;
     secret?: string;
-};
-
-export type TraceSettingsRequest = {
-    enabled?: boolean;
-    level?: string;
-    [key: string]: unknown | boolean | string;
 };
 
 export type UmoListRequest = {
@@ -3533,17 +3531,75 @@ export type GetLogHistoryResponse = (string);
 
 export type GetLogHistoryError = unknown;
 
-export type GetTraceSettingsResponse = (SuccessEnvelope);
+export type GetExecutionTraceOverviewResponse = (SuccessEnvelope);
 
-export type GetTraceSettingsError = unknown;
+export type GetExecutionTraceOverviewError = unknown;
 
-export type UpdateTraceSettingsData = {
-    body: TraceSettingsRequest;
+export type GetExecutionTraceConfigResponse = (SuccessEnvelope);
+
+export type GetExecutionTraceConfigError = unknown;
+
+export type UpdateExecutionTraceConfigData = {
+    body: ExecutionTraceConfigRequest;
 };
 
-export type UpdateTraceSettingsResponse = (SuccessEnvelope);
+export type UpdateExecutionTraceConfigResponse = (SuccessEnvelope);
 
-export type UpdateTraceSettingsError = unknown;
+export type UpdateExecutionTraceConfigError = unknown;
+
+export type ListExecutionTracesData = {
+    query?: {
+        before_ended_at?: number;
+        before_trace_id?: string;
+        degraded?: boolean;
+        limit?: number;
+        operation?: string;
+        plugin_id?: string;
+        status?: string;
+    };
+};
+
+export type ListExecutionTracesResponse = (SuccessEnvelope);
+
+export type ListExecutionTracesError = unknown;
+
+export type ClearExecutionTracesResponse = (SuccessEnvelope);
+
+export type ClearExecutionTracesError = unknown;
+
+export type GetExecutionTraceArtifactData = {
+    path: {
+        content_hash: string;
+    };
+};
+
+export type GetExecutionTraceArtifactResponse = (SuccessEnvelope);
+
+export type GetExecutionTraceArtifactError = unknown;
+
+export type GetExecutionTraceData = {
+    path: {
+        trace_id: string;
+    };
+};
+
+export type GetExecutionTraceResponse = (SuccessEnvelope);
+
+export type GetExecutionTraceError = unknown;
+
+export type DeleteExecutionTraceData = {
+    path: {
+        trace_id: string;
+    };
+};
+
+export type DeleteExecutionTraceResponse = (SuccessEnvelope);
+
+export type DeleteExecutionTraceError = unknown;
+
+export type CleanupExecutionTracesResponse = (SuccessEnvelope);
+
+export type CleanupExecutionTracesError = unknown;
 
 export type ListT2iTemplatesResponse = (SuccessEnvelope);
 

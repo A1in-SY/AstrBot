@@ -295,10 +295,7 @@ DEFAULT_CONFIG = {
     "log_file_path": "logs/astrbot.log",
     "log_file_max_mb": 20,
     "temp_dir_max_size": 1024,
-    "trace_enable": False,
-    "trace_log_enable": False,
-    "trace_log_path": "logs/astrbot.trace.log",
-    "trace_log_max_mb": 20,
+    "execution_trace_enable": True,
     "pip_install_arg": "",
     "pypi_index_url": "https://mirrors.aliyun.com/pypi/simple/",
     "persona": [],  # deprecated
@@ -3089,15 +3086,7 @@ CONFIG_METADATA_2 = {
             "log_file_path": {"type": "string", "condition": {"log_file_enable": True}},
             "log_file_max_mb": {"type": "int", "condition": {"log_file_enable": True}},
             "temp_dir_max_size": {"type": "int"},
-            "trace_log_enable": {"type": "bool"},
-            "trace_log_path": {
-                "type": "string",
-                "condition": {"trace_log_enable": True},
-            },
-            "trace_log_max_mb": {
-                "type": "int",
-                "condition": {"trace_log_enable": True},
-            },
+            "execution_trace_enable": {"type": "bool"},
             "t2i_strategy": {
                 "type": "string",
                 "options": ["remote", "local"],
@@ -4397,21 +4386,6 @@ CONFIG_METADATA_3_SYSTEM = {
                         "description": "临时目录大小上限 (MB)",
                         "type": "int",
                         "hint": "用于限制 data/temp 目录总大小，单位为 MB。系统每 10 分钟检查一次，超限时按文件修改时间从旧到新删除，释放约 30% 当前体积。",
-                    },
-                    "trace_log_enable": {
-                        "description": "启用 Trace 文件日志",
-                        "type": "bool",
-                        "hint": "将 Trace 事件写入独立文件（不影响控制台输出）。",
-                    },
-                    "trace_log_path": {
-                        "description": "Trace 日志文件路径",
-                        "type": "string",
-                        "hint": "相对路径以 data 目录为基准，例如 logs/astrbot.trace.log；支持绝对路径。",
-                    },
-                    "trace_log_max_mb": {
-                        "description": "Trace 日志大小上限 (MB)",
-                        "type": "int",
-                        "hint": "超过大小后自动轮转，默认 20MB。",
                     },
                     "pip_install_arg": {
                         "description": "pip 安装额外参数",

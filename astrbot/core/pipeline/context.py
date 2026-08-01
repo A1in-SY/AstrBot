@@ -9,6 +9,7 @@ from .context_utils import call_event_hook, call_handler
 
 if TYPE_CHECKING:
     from astrbot.core.star import PluginManager
+    from astrbot.core.trace.service import TraceService
 
 
 @dataclass
@@ -18,5 +19,6 @@ class PipelineContext:
     astrbot_config: AstrBotConfig  # AstrBot 配置对象
     plugin_manager: PluginManager  # 插件管理器对象
     astrbot_config_id: str
+    trace_service: TraceService | None = None
     call_handler = call_handler
     call_event_hook = call_event_hook

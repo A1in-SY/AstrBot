@@ -17,7 +17,7 @@ SANDBOX_MODE_PROMPT = (
     # "Before handling complex tasks, please retrieve and review the documentation in the in /app/skills/ directory. "
     # "If the current task matches the description of a specific skill, prioritize following the workflow defined by that skill."
     # "Use `ls /app/skills/` to list all available skills. "
-    # "Use `cat /app/skills/{skill_name}/SKILL.md` to read the documentation of a specific skill."
+    # "Use `load_skill(name=\"<skill_name>\")` to read a specific Skill."
     # "SKILL.md might be large, you can read the description first, which is located in the YAML frontmatter of the file."
     # "Use shell commands such as grep, sed, awk to extract relevant information from the documentation as needed.\n"
 )

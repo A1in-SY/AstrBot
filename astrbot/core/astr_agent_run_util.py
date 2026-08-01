@@ -3,6 +3,7 @@ import re
 import time
 import traceback
 from collections.abc import AsyncGenerator
+from contextlib import nullcontext
 from typing import Any
 
 from astrbot.core import logger
@@ -20,6 +21,8 @@ from astrbot.core.persona_error_reply import (
 )
 from astrbot.core.provider.entities import LLMResponse
 from astrbot.core.provider.provider import TTSProvider
+from astrbot.core.trace.context import current_trace_service
+from astrbot.core.trace.service import NoopTraceSpan, TraceSpan
 
 AgentRunner = ToolLoopAgentRunner[AstrAgentContext]
 
@@ -191,13 +194,6 @@ async def run_agent(
                 if resp.type == "tool_call_result":
                     msg_chain = resp.data["chain"]
 
-                    astr_event.trace.record(
-                        "agent_tool_result",
-                        tool_result=msg_chain.get_plain_text(
-                            with_other_comps_mark=True
-                        ),
-                    )
-
                     if msg_chain.type == "tool_direct_result":
                         # tool_direct_result 用于标记 llm tool 需要直接发送给用户的内容
                         await astr_event.send(msg_chain)
@@ -224,10 +220,6 @@ async def run_agent(
                         yield MessageChain(chain=[], type="break")
 
                     tool_info = _extract_chain_json_data(resp.data["chain"])
-                    astr_event.trace.record(
-                        "agent_tool_call",
-                        tool_name=tool_info if tool_info else "unknown",
-                    )
                     _record_tool_call_name(tool_info, tool_name_by_call_id)
 
                     if astr_event.get_platform_name() == "webchat":
@@ -411,6 +403,25 @@ async def run_live_agent(
     tts_start_time = time.time()
     tts_first_frame_time = 0.0
     first_chunk_received = False
+    tts_audio_chunk_count = 0
+    tts_audio_bytes = 0
+    live_error: BaseException | None = None
+
+    trace_span: TraceSpan | NoopTraceSpan = NoopTraceSpan()
+    trace_service = current_trace_service()
+    if trace_service is not None:
+        try:
+            trace_span = trace_service.start_span(
+                "tts.pipeline",
+                kind="pipeline",
+                attributes={
+                    "provider_type": tts_provider.meta().type,
+                    "streaming": support_stream,
+                    "mode": "live",
+                },
+            )
+        except Exception:
+            trace_span = NoopTraceSpan()
 
     # 创建队列
     text_queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -431,19 +442,33 @@ async def run_live_agent(
     )
 
     # 2. 启动 TTS 任务：负责从 text_queue 读取文本并生成音频到 audio_queue
-    if support_stream:
-        tts_task = asyncio.create_task(
-            _safe_tts_stream_wrapper(tts_provider, text_queue, audio_queue)
+    async def run_tts_pipeline() -> bool:
+        """Run the independent live TTS worker under its sibling Trace Span.
+
+        Returns:
+            Whether the worker completed without a provider-side failure.
+        """
+
+        span_scope = (
+            trace_span.activate()
+            if isinstance(trace_span, TraceSpan)
+            else nullcontext()
         )
-    else:
-        tts_task = asyncio.create_task(
-            _simulated_stream_tts(
+        with span_scope:
+            if support_stream:
+                return await _safe_tts_stream_wrapper(
+                    tts_provider,
+                    text_queue,
+                    audio_queue,
+                )
+            return await _simulated_stream_tts(
                 tts_provider,
                 text_queue,
                 audio_queue,
                 agent_runner.run_context.context.event,
             )
-        )
+
+    tts_task = asyncio.create_task(run_tts_pipeline())
 
     # 3. 主循环：从 audio_queue 读取音频并 yield
     try:
@@ -458,6 +483,9 @@ async def run_live_agent(
                 text, audio_data = queue_item
             else:
                 audio_data = queue_item
+
+            tts_audio_chunk_count += 1
+            tts_audio_bytes += len(audio_data)
 
             if not first_chunk_received:
                 # 记录首帧延迟（从开始处理到收到第一个音频块）
@@ -475,6 +503,7 @@ async def run_live_agent(
             yield chain
 
     except Exception as e:
+        live_error = e
         logger.error(f"[Live Agent] 运行时发生错误: {e}", exc_info=True)
     finally:
         # 清理任务
@@ -482,9 +511,31 @@ async def run_live_agent(
             feeder_task.cancel()
         if not tts_task.done():
             tts_task.cancel()
-
-        # 确保队列被消费
-        pass
+        task_results = await asyncio.gather(
+            feeder_task,
+            tts_task,
+            return_exceptions=True,
+        )
+        tts_result = task_results[1]
+        if isinstance(trace_span, TraceSpan):
+            trace_span.set_attributes(
+                audio_chunk_count=tts_audio_chunk_count,
+                audio_bytes=tts_audio_bytes,
+                first_frame_seconds=tts_first_frame_time or None,
+            )
+            if isinstance(tts_result, asyncio.CancelledError):
+                trace_span.finish(status="cancelled", outcome="cancelled")
+            elif isinstance(tts_result, BaseException):
+                trace_span.set_attributes(exception_type=type(tts_result).__name__)
+                trace_span.finish(status="error", outcome="exception")
+            elif tts_result is False:
+                trace_span.mark_degraded("tts_provider_failed")
+                trace_span.finish(status="error", outcome="provider_failed")
+            elif live_error is not None:
+                trace_span.mark_degraded("live_delivery_failed")
+                trace_span.finish(status="error", outcome="delivery_failed")
+            else:
+                trace_span.finish(outcome="completed")
 
     tts_end_time = time.time()
 
@@ -579,14 +630,16 @@ async def _safe_tts_stream_wrapper(
     tts_provider: TTSProvider,
     text_queue: asyncio.Queue[str | None],
     audio_queue: "asyncio.Queue[bytes | tuple[str, bytes] | None]",
-) -> None:
+) -> bool:
     """包装原生流式 TTS 确保异常处理和队列关闭"""
     try:
         await tts_provider.get_audio_stream(text_queue, audio_queue)
     except Exception as e:
         logger.error(f"[Live TTS Stream] Error: {e}", exc_info=True)
+        return False
     finally:
         await audio_queue.put(None)
+    return True
 
 
 async def _simulated_stream_tts(
@@ -594,7 +647,7 @@ async def _simulated_stream_tts(
     text_queue: asyncio.Queue[str | None],
     audio_queue: "asyncio.Queue[bytes | tuple[str, bytes] | None]",
     astr_event: Any,
-) -> None:
+) -> bool:
     """模拟流式 TTS 分句生成音频.
 
     Args:
@@ -605,6 +658,7 @@ async def _simulated_stream_tts(
             event finishes.
     """
 
+    had_error = False
     try:
         while True:
             text = await text_queue.get()
@@ -620,12 +674,15 @@ async def _simulated_stream_tts(
                     astr_event.track_temporary_local_file(audio_path)
                     await audio_queue.put((text, audio_data))
             except Exception as e:
+                had_error = True
                 logger.error(
                     f"[Live TTS Simulated] Error processing text '{text[:20]}...': {e}"
                 )
                 # 继续处理下一句
 
     except Exception as e:
+        had_error = True
         logger.error(f"[Live TTS Simulated] Critical Error: {e}", exc_info=True)
     finally:
         await audio_queue.put(None)
+    return not had_error

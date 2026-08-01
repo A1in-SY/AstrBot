@@ -1,12 +1,56 @@
 import inspect
 import traceback
 import typing as T
+from contextlib import contextmanager
 
 from astrbot import logger
 from astrbot.core.message.message_event_result import CommandResult, MessageEventResult
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.star.star import star_map
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
+from astrbot.core.trace.context import current_trace_service
+from astrbot.core.trace.service import NoopTraceSpan, TraceSpan
+
+
+@contextmanager
+def activate_trace_span(
+    span: TraceSpan | NoopTraceSpan | None,
+) -> T.Iterator[None]:
+    """Install ``span`` only for the duration of actual traced work."""
+
+    if not isinstance(span, TraceSpan):
+        yield
+        return
+    with span.activate():
+        yield
+
+
+async def iterate_async_generator_with_trace_span(
+    generator: T.AsyncGenerator[T.Any, None],
+    span: TraceSpan | NoopTraceSpan | None,
+) -> T.AsyncGenerator[T.Any, None]:
+    """Advance and close an async generator under ``span`` without leaking it.
+
+    An async generator is suspended while its value is handled by its consumer.
+    Keeping a ContextVar span installed across that suspension would incorrectly
+    parent all downstream Pipeline work to the plugin handler.  Limit the active
+    context to ``anext`` and ``aclose`` instead.
+    """
+
+    exhausted = False
+    try:
+        while True:
+            try:
+                with activate_trace_span(span):
+                    item = await anext(generator)
+            except StopAsyncIteration:
+                exhausted = True
+                return
+            yield item
+    finally:
+        if not exhausted:
+            with activate_trace_span(span):
+                await generator.aclose()
 
 
 async def call_handler(
@@ -65,6 +109,12 @@ async def call_handler(
         except Exception as e:
             logger.error(f"Previous Error: {trace_}")
             raise e
+        finally:
+            # ``async for`` does not close an async generator when this wrapper
+            # itself is closed while suspended at ``yield``.  Close it here so
+            # plugin ``finally`` blocks run immediately in the trace context
+            # installed by ``iterate_async_generator_with_trace_span``.
+            await ready_to_call.aclose()
     elif inspect.iscoroutine(ready_to_call):
         # 如果只是一个协程, 直接执行
         ret = await ready_to_call
@@ -92,14 +142,60 @@ async def call_event_hook(
         hook_type,
         plugins_name=event.plugins_name,
     )
-    for handler in handlers:
+    for invocation_index, handler in enumerate(handlers, start=1):
+        plugin = star_map.get(handler.handler_module_path)
+        trace_service = current_trace_service()
+        trace_span = (
+            trace_service.start_span(
+                "plugin.hook",
+                kind="plugin",
+                source="plugin",
+                plugin_id=plugin.plugin_id if plugin is not None else None,
+                materialize=False,
+                attributes={
+                    "handler": handler.handler_name,
+                    "event_type": hook_type.name,
+                    "priority": handler.extras_configs.get("priority", 0),
+                    "invocation_index": invocation_index,
+                    "event_stopped_before": event.is_stopped(),
+                    "result_present_before": event.get_result() is not None,
+                },
+            )
+            if trace_service is not None
+            else None
+        )
         try:
             assert inspect.iscoroutinefunction(handler.handler)
             logger.debug(
                 f"hook({hook_type.name}) -> {star_map[handler.handler_module_path].name} - {handler.handler_name}",
             )
-            await handler.handler(event, *args, **kwargs)
+            if trace_span is None:
+                await handler.handler(event, *args, **kwargs)
+            else:
+                result_before = event.get_result()
+                with trace_span:
+                    await handler.handler(event, *args, **kwargs)
+                    result_after = event.get_result()
+                    if result_before is result_after:
+                        result_mutation = "unchanged"
+                    elif result_before is None:
+                        result_mutation = "set"
+                    elif result_after is None:
+                        result_mutation = "cleared"
+                    else:
+                        result_mutation = "replaced"
+                    trace_span.set_attributes(
+                        event_stopped_after=event.is_stopped(),
+                        result_present_after=result_after is not None,
+                        result_mutation=result_mutation,
+                    )
+                    trace_span.add_event(
+                        "plugin.hook.completed",
+                        result_mutation=result_mutation,
+                    )
         except BaseException:
+            if trace_service is not None:
+                trace_service.materialize()
             logger.error(traceback.format_exc())
 
         if event.is_stopped():

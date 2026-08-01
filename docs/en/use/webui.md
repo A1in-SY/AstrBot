@@ -95,14 +95,11 @@ Filter by plugin, type (command / command group / subcommand), permission, and s
 
 You can enable/disable and rename each command.
 
-## Trace
+## Execution Trace
 
-In the `Trace` page of the admin panel, you can view the real-time execution trace of AstrBot. This is useful for debugging model call paths, tool invocation processes, etc.
+The top-level `Trace` page in the admin panel shows durable execution observations. Each Trace retains its real Span tree, events, Artifacts, and cross-Trace Links, which makes it useful for inspecting message processing, Agents, model calls, tools/MCP, Skill loading, STT/TTS, and message delivery.
 
-You can enable or disable trace recording using the switch at the top of the page.
-
-> [!NOTE]
-> Currently only recording partial model call paths from AstrBot main Agent. More coverage will be added.
+Streaming output stores only the final semantic result rather than every SSE or WebSocket increment. The page header can enable or pause future capture, run retention cleanup, or remove completed Traces manually.
 
 ## Updating the Admin Panel
 

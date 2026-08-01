@@ -8,6 +8,8 @@ from typing import Protocol, runtime_checkable
 from astrbot.core import astrbot_config, logger, sp
 from astrbot.core.astrbot_config_mgr import AstrBotConfigManager
 from astrbot.core.db import BaseDatabase
+from astrbot.core.trace.provider_instrumentation import instrument_provider
+from astrbot.core.trace.service import TraceService
 from astrbot.core.utils.error_redaction import safe_error
 
 from ..persona_mgr import PersonaManager
@@ -34,6 +36,7 @@ class ProviderManager:
         acm: AstrBotConfigManager,
         db_helper: BaseDatabase,
         persona_mgr: PersonaManager,
+        trace_service: TraceService | None = None,
     ) -> None:
         self.reload_lock = asyncio.Lock()
         self.resource_lock = asyncio.Lock()
@@ -80,6 +83,7 @@ class ProviderManager:
             Callable[[str, ProviderType, str | None], None]
         ] = []
         self._mcp_init_task: asyncio.Task | None = None
+        self.trace_service = trace_service
 
     def set_provider_change_callback(
         self,
@@ -739,6 +743,7 @@ class ProviderManager:
                         f"Unknown provider type: {provider_metadata.provider_type}"
                     )
 
+            instrument_provider(inst, self.trace_service)
             self.inst_map[provider_config["id"]] = inst
         except Exception as e:
             logger.error(

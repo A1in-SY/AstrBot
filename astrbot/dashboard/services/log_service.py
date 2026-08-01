@@ -6,7 +6,6 @@ import time
 from collections.abc import AsyncGenerator
 
 from astrbot.core import LogBroker, logger
-from astrbot.core.config.astrbot_config import AstrBotConfig
 
 
 class LogServiceError(Exception):
@@ -14,9 +13,8 @@ class LogServiceError(Exception):
 
 
 class LogService:
-    def __init__(self, log_broker: LogBroker, config: AstrBotConfig) -> None:
+    def __init__(self, log_broker: LogBroker) -> None:
         self.log_broker = log_broker
-        self.config = config
 
     @staticmethod
     def format_log_sse(log: dict, ts: float) -> str:
@@ -68,27 +66,3 @@ class LogService:
         except Exception as exc:
             logger.error(f"获取日志历史失败: {exc}")
             raise LogServiceError(f"获取日志历史失败: {exc}") from exc
-
-    def get_trace_settings(self) -> dict:
-        try:
-            return {"trace_enable": self.config.get("trace_enable", True)}
-        except Exception as exc:
-            logger.error(f"获取 Trace 设置失败: {exc}")
-            raise LogServiceError(f"获取 Trace 设置失败: {exc}") from exc
-
-    def update_trace_settings(self, payload: dict | None) -> str:
-        try:
-            if payload is None:
-                raise LogServiceError("请求数据为空")
-
-            trace_enable = payload.get("trace_enable")
-            if trace_enable is not None:
-                self.config["trace_enable"] = bool(trace_enable)
-                self.config.save_config()
-
-            return "Trace 设置已更新"
-        except LogServiceError:
-            raise
-        except Exception as exc:
-            logger.error(f"更新 Trace 设置失败: {exc}")
-            raise LogServiceError(f"更新 Trace 设置失败: {exc}") from exc

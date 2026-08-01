@@ -1065,18 +1065,6 @@
         "description": "临时目录大小上限 (MB)",
         "hint": "用于限制 data/temp 目录总大小，单位为 MB。系统每 10 分钟检查一次，超限时按文件修改时间从旧到新删除，释放约 30% 当前体积。"
       },
-      "trace_log_enable": {
-        "description": "启用 Trace 文件日志",
-        "hint": "将 Trace 事件写入独立文件（不影响控制台输出）。"
-      },
-      "trace_log_path": {
-        "description": "Trace 日志文件路径",
-        "hint": "相对路径以 data 目录为基准，例如 logs/astrbot.trace.log；支持绝对路径。"
-      },
-      "trace_log_max_mb": {
-        "description": "Trace 日志大小上限 (MB)",
-        "hint": "超过大小后自动轮转，默认 20MB。"
-      },
       "pip_install_arg": {
         "description": "pip 安装额外参数",
         "hint": "安装插件依赖时,会使用 Python 的 pip 工具。这里可以填写额外的参数,如 `--break-system-package` 等。"

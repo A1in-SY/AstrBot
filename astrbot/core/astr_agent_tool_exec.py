@@ -45,6 +45,8 @@ from astrbot.core.tools.computer_tools import (
     PythonTool,
 )
 from astrbot.core.tools.message_tools import SendMessageToUserTool
+from astrbot.core.trace.context import current_trace_service, detached_trace_context
+from astrbot.core.trace.service import TraceSpan
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.history_saver import persist_agent_history
 from astrbot.core.utils.image_ref_utils import is_supported_image_ref
@@ -52,6 +54,149 @@ from astrbot.core.utils.string_utils import normalize_and_dedupe_strings
 
 
 class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
+    @classmethod
+    async def _run_detached_background_with_trace(
+        cls,
+        *,
+        worker: T.Callable[[], T.Awaitable[None]],
+        trace_service: T.Any,
+        submitting_trace_id: str | None,
+        submitting_span_id: str | None,
+        task_id: str,
+        tool_name: str,
+        background_kind: str,
+    ) -> None:
+        """Run one known-detached worker inside its own fail-open Trace root."""
+
+        trace_scope: T.Any = None
+        trace_root: T.Any = None
+        if trace_service is not None:
+            try:
+                trace_scope = trace_service.start_root(
+                    "tool.background.run",
+                    kind="tool",
+                    attributes={
+                        "task_id": task_id,
+                        "tool_name": tool_name,
+                        "background_kind": background_kind,
+                    },
+                )
+                trace_root = trace_scope.__enter__()
+            except Exception:  # Trace must never prevent background work.
+                trace_scope = None
+                trace_root = None
+
+        if (
+            trace_root is not None
+            and submitting_trace_id is not None
+            and submitting_span_id is not None
+        ):
+            try:
+                trace_root.make_link(
+                    "spawned_by",
+                    target_trace_id=submitting_trace_id,
+                    target_span_id=submitting_span_id,
+                    attributes={"task_id": task_id},
+                )
+            except Exception:
+                try:
+                    trace_root.mark_degraded("background_link_capture_failed")
+                except Exception:
+                    pass
+
+        try:
+            await worker()
+        except BaseException as exc:
+            if trace_scope is not None:
+                try:
+                    trace_scope.__exit__(type(exc), exc, exc.__traceback__)
+                except Exception:
+                    pass
+                trace_scope = None
+            raise
+        else:
+            if trace_scope is not None:
+                try:
+                    trace_scope.__exit__(None, None, None)
+                except Exception:
+                    pass
+
+    @classmethod
+    def _submit_detached_background(
+        cls,
+        *,
+        run_context: ContextWrapper[AstrAgentContext],
+        worker: T.Callable[[], T.Awaitable[None]],
+        task_id: str,
+        tool_name: str,
+        background_kind: str,
+        failure_label: str,
+    ) -> None:
+        """Schedule a known background boundary without copying its Trace parent."""
+
+        active_trace_service = current_trace_service()
+        trace_service = active_trace_service or getattr(
+            getattr(run_context.context, "context", None),
+            "trace_service",
+            None,
+        )
+        submitting_span: TraceSpan | None = None
+        if active_trace_service is not None:
+            try:
+                active_span = active_trace_service.current_span()
+                if (
+                    isinstance(active_span, TraceSpan)
+                    and active_span.operation == "tool.call"
+                ):
+                    submitting_span = active_span
+            except Exception:
+                submitting_span = None
+
+        submitting_trace_id = (
+            submitting_span.trace_id if submitting_span is not None else None
+        )
+        submitting_span_id = (
+            submitting_span.span_id if submitting_span is not None else None
+        )
+
+        async def _run() -> None:
+            try:
+                await cls._run_detached_background_with_trace(
+                    worker=worker,
+                    trace_service=trace_service,
+                    submitting_trace_id=submitting_trace_id,
+                    submitting_span_id=submitting_span_id,
+                    task_id=task_id,
+                    tool_name=tool_name,
+                    background_kind=background_kind,
+                )
+            except Exception as e:  # noqa: BLE001 - retain existing log-and-return.
+                logger.error(
+                    f"{failure_label} failed: {e!s}",
+                    exc_info=True,
+                )
+
+        # ``create_task`` copies ContextVars.  Clear only Trace state while the
+        # known detached task captures its context; all other context remains.
+        with detached_trace_context():
+            asyncio.create_task(_run())
+
+        if submitting_span is not None:
+            try:
+                submitting_span.set_attributes(
+                    background_submission=True,
+                    background_task_id=task_id,
+                    background_kind=background_kind,
+                )
+                submitting_span.set_outcome("submitted")
+                submitting_span.add_event(
+                    "tool.background.submitted",
+                    task_id=task_id,
+                    background_kind=background_kind,
+                )
+            except Exception:
+                pass
+
     @classmethod
     def _collect_image_urls_from_args(cls, image_urls_raw: T.Any) -> list[str]:
         if image_urls_raw is None:
@@ -158,20 +303,21 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
             task_id = uuid.uuid4().hex
 
             async def _run_in_background() -> None:
-                try:
-                    await cls._execute_background(
-                        tool=tool,
-                        run_context=run_context,
-                        task_id=task_id,
-                        **tool_args,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    logger.error(
-                        f"Background task {task_id} failed: {e!s}",
-                        exc_info=True,
-                    )
+                await cls._execute_background(
+                    tool=tool,
+                    run_context=run_context,
+                    task_id=task_id,
+                    **tool_args,
+                )
 
-            asyncio.create_task(_run_in_background())
+            cls._submit_detached_background(
+                run_context=run_context,
+                worker=_run_in_background,
+                task_id=task_id,
+                tool_name=tool.name,
+                background_kind="tool",
+                failure_label=f"Background task {task_id}",
+            )
             text_content = mcp.types.TextContent(
                 type="text",
                 text=f"Background task submitted. task_id={task_id}",
@@ -390,20 +536,21 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
         task_id = uuid.uuid4().hex
 
         async def _run_handoff_in_background() -> None:
-            try:
-                await cls._do_handoff_background(
-                    tool=tool,
-                    run_context=run_context,
-                    task_id=task_id,
-                    **tool_args,
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.error(
-                    f"Background handoff {task_id} ({tool.name}) failed: {e!s}",
-                    exc_info=True,
-                )
+            await cls._do_handoff_background(
+                tool=tool,
+                run_context=run_context,
+                task_id=task_id,
+                **tool_args,
+            )
 
-        asyncio.create_task(_run_handoff_in_background())
+        cls._submit_detached_background(
+            run_context=run_context,
+            worker=_run_handoff_in_background,
+            task_id=task_id,
+            tool_name=tool.name,
+            background_kind="handoff",
+            failure_label=f"Background handoff {task_id} ({tool.name})",
+        )
 
         text_content = mcp.types.TextContent(
             type="text",

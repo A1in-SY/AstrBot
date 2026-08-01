@@ -15,11 +15,11 @@ import threading
 import time
 import traceback
 from asyncio import Queue
+from pathlib import Path
 
 from astrbot.a1in_release import get_a1in_release_identity
 from astrbot.api import logger, sp
 from astrbot.core import LogBroker, LogManager
-from astrbot.core.agent.hooks import AGENT_LLM_HOOKS_API_VERSION
 from astrbot.core.astrbot_config_mgr import AstrBotConfigManager
 from astrbot.core.config.default import VERSION
 from astrbot.core.conversation_mgr import ConversationManager
@@ -35,8 +35,10 @@ from astrbot.core.star.context import Context
 from astrbot.core.star.star_handler import EventType, star_handlers_registry, star_map
 from astrbot.core.star.star_manager import PluginManager
 from astrbot.core.subagent_orchestrator import SubAgentOrchestrator
+from astrbot.core.trace.service import TraceService
 from astrbot.core.umop_config_router import UmopConfigRouter
 from astrbot.core.updator import AstrBotUpdator
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.event_loop_diagnostics import (
     create_event_loop_diagnostic_tasks,
 )
@@ -64,6 +66,7 @@ class AstrBotCoreLifecycle:
         self.subagent_orchestrator: SubAgentOrchestrator | None = None
         self.cron_manager: CronJobManager | None = None
         self.temp_dir_cleaner: TempDirCleaner | None = None
+        self.trace_service: TraceService | None = None
         self._default_chat_provider_warning_emitted = False
 
         # 设置代理
@@ -164,21 +167,17 @@ class AstrBotCoreLifecycle:
         logger.info("AstrBot v" + VERSION)
         a1in_identity = get_a1in_release_identity()
         logger.info(
-            "A1in release %s (upstream base %s, source revision %s, "
-            "agent LLM hooks API v%s)",
+            "A1in release %s (upstream base %s, source revision %s)",
             a1in_identity["a1in_release"],
             a1in_identity["a1in_upstream_base"],
             a1in_identity["a1in_source_revision"] or "source-tree",
-            AGENT_LLM_HOOKS_API_VERSION,
         )
         if os.environ.get("TESTING", ""):
             LogManager.configure_logger(
                 logger, self.astrbot_config, override_level="DEBUG"
             )
-            LogManager.configure_trace_logger(self.astrbot_config)
         else:
             LogManager.configure_logger(logger, self.astrbot_config)
-            LogManager.configure_trace_logger(self.astrbot_config)
 
         await self.db.initialize()
 
@@ -213,6 +212,12 @@ class AstrBotCoreLifecycle:
             logger.error(f"AstrBot migration failed: {e!s}")
             logger.error(traceback.format_exc())
 
+        self.trace_service = TraceService(
+            Path(get_astrbot_data_path()) / "trace",
+            enabled=bool(self.astrbot_config.get("execution_trace_enable", True)),
+        )
+        await self.trace_service.initialize()
+
         # 初始化事件队列
         self.event_queue = Queue()
 
@@ -225,6 +230,7 @@ class AstrBotCoreLifecycle:
             self.astrbot_config_mgr,
             self.db,
             self.persona_mgr,
+            self.trace_service,
         )
 
         # 初始化平台管理器
@@ -259,6 +265,7 @@ class AstrBotCoreLifecycle:
             self.kb_manager,
             self.cron_manager,
             self.subagent_orchestrator,
+            self.trace_service,
         )
 
         # 初始化插件管理器
@@ -391,6 +398,9 @@ class AstrBotCoreLifecycle:
         if self.temp_dir_cleaner:
             await self.temp_dir_cleaner.stop()
 
+        if hasattr(self, "event_bus"):
+            await self.event_bus.shutdown()
+
         # 请求停止所有正在运行的异步任务
         for task in self.curr_tasks:
             task.cancel()
@@ -420,6 +430,9 @@ class AstrBotCoreLifecycle:
                 pass
             except Exception as e:
                 logger.error(f"任务 {task.get_name()} 发生错误: {e}")
+
+        if self.trace_service:
+            await self.trace_service.close()
 
         # 释放数据库引擎连接池
         try:
@@ -462,7 +475,12 @@ class AstrBotCoreLifecycle:
         mapping = {}
         for conf_id, ab_config in self.astrbot_config_mgr.confs.items():
             scheduler = PipelineScheduler(
-                PipelineContext(ab_config, self.plugin_manager, conf_id),
+                PipelineContext(
+                    ab_config,
+                    self.plugin_manager,
+                    conf_id,
+                    trace_service=self.trace_service,
+                ),
             )
             await scheduler.initialize()
             mapping[conf_id] = scheduler
@@ -479,7 +497,12 @@ class AstrBotCoreLifecycle:
         if not ab_config:
             raise ValueError(f"配置文件 {conf_id} 不存在")
         scheduler = PipelineScheduler(
-            PipelineContext(ab_config, self.plugin_manager, conf_id),
+            PipelineContext(
+                ab_config,
+                self.plugin_manager,
+                conf_id,
+                trace_service=self.trace_service,
+            ),
         )
         await scheduler.initialize()
         self.pipeline_scheduler_mapping[conf_id] = scheduler

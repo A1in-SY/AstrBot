@@ -16,6 +16,7 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.platform_metadata import PlatformMetadata
 from astrbot.core.provider import Provider
 from astrbot.core.provider.entities import ProviderRequest
+from astrbot.core.skills.load_skill_tool import LoadSkillTool
 from astrbot.core.skills.skill_manager import SkillInfo
 from astrbot.core.star.star import StarMetadata
 
@@ -801,9 +802,7 @@ class TestEnsurePersonaAndSkills:
         mock_context.persona_manager.resolve_selected_persona = AsyncMock(
             return_value=("conv-persona", persona, None, False)
         )
-        mock_event.get_extra.side_effect = (
-            lambda key: key == "enable_inline_genui"
-        )
+        mock_event.get_extra.side_effect = lambda key: key == "enable_inline_genui"
         req = ProviderRequest()
         req.conversation = MagicMock(persona_id="conv-persona")
 
@@ -818,9 +817,7 @@ class TestEnsurePersonaAndSkills:
     ):
         """Test inline GenUI instructions are added before conversation setup."""
         module = ama
-        mock_event.get_extra.side_effect = (
-            lambda key: key == "enable_inline_genui"
-        )
+        mock_event.get_extra.side_effect = lambda key: key == "enable_inline_genui"
         req = ProviderRequest()
 
         await module._ensure_persona_and_skills(req, {}, mock_context, mock_event)
@@ -917,6 +914,7 @@ class TestEnsurePersonaAndSkills:
         req = ProviderRequest()
         req.conversation = MagicMock(persona_id=None)
         runtime_config = {"computer_use_runtime": "local"}
+        mock_context.get_llm_tool_manager.return_value.get_full_tool_set.return_value = ToolSet()
 
         await module._ensure_persona_and_skills(
             req, runtime_config, mock_context, mock_event
@@ -925,10 +923,80 @@ class TestEnsurePersonaAndSkills:
         assert "**workspace-skill**" in req.system_prompt
         assert "Workspace scoped skill." in req.system_prompt
         assert "Global scoped skill." not in req.system_prompt
-        assert (
-            str(workspace_skill_dir / "SKILL.md").replace("\\", "/")
-            in req.system_prompt
+        assert str(workspace_skill_dir / "SKILL.md").replace("\\", "/") not in (
+            req.system_prompt
         )
+        skill_loader = req.func_tool.get_tool("load_skill")
+        assert isinstance(skill_loader, LoadSkillTool)
+        assert skill_loader.skills_by_name["workspace-skill"].path == str(
+            workspace_skill_dir / "SKILL.md"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ensure_skills_adds_request_scoped_loader_after_catalog_merge(
+        self,
+        monkeypatch,
+        mock_event,
+        mock_context,
+    ):
+        module = ama
+        skill = SkillInfo(
+            name="declared",
+            description="Declared skill",
+            path="/tmp/declared/SKILL.md",
+            active=True,
+        )
+        skill_manager = MagicMock()
+        skill_manager.list_skills.return_value = [skill]
+        skill_manager.list_workspace_skills.return_value = []
+        monkeypatch.setattr(module, "SkillManager", lambda: skill_manager)
+        mock_context.get_llm_tool_manager.return_value.get_full_tool_set.return_value = ToolSet()
+        req = ProviderRequest()
+        req.conversation = MagicMock(persona_id=None)
+
+        await module._ensure_persona_and_skills(
+            req,
+            {"computer_use_runtime": "local"},
+            mock_context,
+            mock_event,
+        )
+
+        skill_loader = req.func_tool.get_tool("load_skill")
+        assert isinstance(skill_loader, LoadSkillTool)
+        assert set(skill_loader.skills_by_name) == {"declared"}
+        assert skill_loader.runtime == "local"
+
+    @pytest.mark.asyncio
+    async def test_ensure_skills_does_not_add_loader_when_runtime_is_none(
+        self,
+        monkeypatch,
+        mock_event,
+        mock_context,
+    ):
+        module = ama
+        skill_manager = MagicMock()
+        skill_manager.list_skills.return_value = [
+            SkillInfo(
+                name="declared",
+                description="Declared skill",
+                path="/tmp/declared/SKILL.md",
+                active=True,
+            )
+        ]
+        monkeypatch.setattr(module, "SkillManager", lambda: skill_manager)
+        mock_context.get_llm_tool_manager.return_value.get_full_tool_set.return_value = ToolSet()
+        req = ProviderRequest()
+        req.conversation = MagicMock(persona_id=None)
+
+        await module._ensure_persona_and_skills(
+            req,
+            {"computer_use_runtime": "none"},
+            mock_context,
+            mock_event,
+        )
+
+        assert req.func_tool.get_tool("load_skill") is None
+        assert "The `load_skill` tool is unavailable" in req.system_prompt
 
     @pytest.mark.asyncio
     async def test_ensure_skills_respects_empty_persona_skills_for_workspace(

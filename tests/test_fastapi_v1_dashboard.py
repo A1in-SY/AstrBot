@@ -13,6 +13,7 @@ from fastapi.responses import PlainTextResponse
 
 import astrbot.dashboard.services.config_service as config_service
 from astrbot.core import file_token_service
+from astrbot.core.trace.service import TraceService
 from astrbot.dashboard.api.app import create_dashboard_asgi_app
 from astrbot.dashboard.asgi_runtime import (
     FastAPIAppAdapter,
@@ -1062,6 +1063,51 @@ async def test_v1_scope_dependencies_accept_dashboard_cookie(
     data = response.json()
     assert data["status"] == "ok"
     assert isinstance(data["data"]["bots"], list)
+
+
+@pytest.mark.asyncio
+async def test_v1_execution_trace_uses_core_storage_and_replaces_legacy_settings(
+    asgi_client: httpx.AsyncClient,
+    fake_core_lifecycle,
+    tmp_path: Path,
+):
+    trace_service = TraceService(tmp_path / "trace")
+    await trace_service.initialize()
+    fake_core_lifecycle.trace_service = trace_service
+    try:
+        with trace_service.start_root("group_summary.run") as root:
+            root.record_text("assistant_completion", "summary")
+        await trace_service.flush()
+
+        response = await asgi_client.get("/api/v1/traces", headers=_jwt_headers())
+        assert response.status_code == 200
+        payload = response.json()["data"]
+        assert payload["items"][0]["operation"] == "group_summary.run"
+
+        trace_id = payload["items"][0]["trace_id"]
+        detail_response = await asgi_client.get(
+            f"/api/v1/traces/{trace_id}",
+            headers=_jwt_headers(),
+        )
+        assert detail_response.status_code == 200
+        assert detail_response.json()["data"]["trace"]["trace_id"] == trace_id
+
+        config_response = await asgi_client.put(
+            "/api/v1/traces/config",
+            headers=_jwt_headers(),
+            json={"enabled": False},
+        )
+        assert config_response.status_code == 200
+        assert config_response.json()["data"]["enabled"] is False
+        assert trace_service.enabled is False
+
+        legacy_response = await asgi_client.get(
+            "/api/v1/trace/settings",
+            headers=_jwt_headers(),
+        )
+        assert legacy_response.status_code == 404
+    finally:
+        await trace_service.close()
 
 
 @pytest.mark.asyncio

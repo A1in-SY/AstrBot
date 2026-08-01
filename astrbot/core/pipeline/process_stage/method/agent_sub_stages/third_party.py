@@ -38,6 +38,7 @@ from astrbot.core.provider.entities import (
     ProviderRequest,
 )
 from astrbot.core.star.star_handler import EventType
+from astrbot.core.trace.agent_instrumentation import instrument_agent_runner
 from astrbot.core.utils.config_number import coerce_int_config
 from astrbot.core.utils.metrics import Metric
 
@@ -347,6 +348,7 @@ class ThirdPartyAgentSubStage(Stage):
             raise ValueError(
                 f"Unsupported third party agent runner type: {self.runner_type}",
             )
+        instrument_agent_runner(runner, self.ctx.trace_service)
 
         astr_agent_ctx = AstrAgentContext(
             context=self.ctx.plugin_manager.context,
