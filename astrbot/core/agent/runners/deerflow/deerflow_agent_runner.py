@@ -15,6 +15,7 @@ from astrbot.core.provider.entities import (
     LLMResponse,
     ProviderRequest,
 )
+from astrbot.core.utils.async_generator import closing_async_generator
 from astrbot.core.utils.config_number import coerce_int_config
 
 from ...hooks import BaseAgentRunHooks
@@ -313,8 +314,10 @@ class DeerFlowAgentRunner(BaseAgentRunner[TContext]):
         step_count = 0
         while not self.done() and step_count < max_step:
             step_count += 1
-            async for resp in self.step():
-                yield resp
+            step_responses = self.step()
+            async with closing_async_generator(step_responses):
+                async for resp in step_responses:
+                    yield resp
 
         if not self.done():
             raise RuntimeError(

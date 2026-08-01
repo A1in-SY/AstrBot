@@ -8,7 +8,13 @@ from typing import Any
 
 import pytest
 
-from astrbot.core.pipeline.process_stage.stage import StarRequestSubStage
+from astrbot.core.pipeline.process_stage.stage import (
+    AgentRequestSubStage,
+    ProcessStage,
+    StarRequestSubStage,
+)
+from astrbot.core.pipeline.scheduler import PipelineScheduler
+from astrbot.core.star.session_llm_manager import SessionServiceManager
 from astrbot.core.star.star import StarMetadata, star_map
 from astrbot.core.star.star_handler import EventType, StarHandlerMetadata
 from astrbot.core.trace.service import TraceService
@@ -216,3 +222,145 @@ async def test_plugin_handler_normal_exhaustion_finishes_successfully(
         ]
     finally:
         await service.close()
+
+
+@pytest.mark.asyncio
+async def test_stopped_pipeline_closes_plugin_handler_before_root_trace(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A stopped event must not leave a running child in a terminal Trace."""
+
+    service = TraceService(tmp_path / "trace")
+    await service.initialize()
+    module_path = "tests.trace_plugin_stop_event"
+
+    async def stopping_handler(event):
+        event.stop_event()
+        yield "stopped"
+
+    metadata = _handler_metadata(stopping_handler, module_path)
+    monkeypatch.setitem(
+        star_map,
+        module_path,
+        StarMetadata(name="TracePlugin", author="Tests"),
+    )
+    scheduler = object.__new__(PipelineScheduler)
+    process_stage = ProcessStage()
+    process_stage.ctx = SimpleNamespace(
+        astrbot_config={"provider_settings": {"enable": False}}
+    )
+    process_stage.star_request_sub_stage = _stage(service)
+    process_stage.agent_sub_stage = None
+    scheduler.stages = [process_stage]
+
+    try:
+        with service.start_root("test.plugin_pipeline"):
+            await scheduler._process_stages(_Event(metadata))
+
+        await service.flush()
+        trace = (await service.store.list_traces())[0]
+        detail = await service.store.get_trace(trace["trace_id"])
+        plugin_span = next(
+            span for span in detail["spans"] if span["operation"] == "plugin.handler"
+        )
+        assert detail["trace"]["status"] == "success"
+        assert plugin_span["status"] == "cancelled"
+        assert plugin_span["outcome"] == "generator_closed"
+        assert plugin_span["ended_at"] is not None
+        assert all(span["status"] != "running" for span in detail["spans"])
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_close_error_does_not_mask_downstream_failure():
+    """Generator cleanup must preserve the original pipeline exception."""
+
+    class _UpstreamStage:
+        async def process(self, event):
+            del event
+            try:
+                yield
+            finally:
+                raise RuntimeError("cleanup failed")
+
+    class _DownstreamStage:
+        async def process(self, event):
+            del event
+            raise ValueError("downstream failed")
+
+    scheduler = object.__new__(PipelineScheduler)
+    scheduler.stages = [_UpstreamStage(), _DownstreamStage()]
+    event = SimpleNamespace(is_stopped=lambda: False)
+
+    with pytest.raises(ValueError, match="downstream failed"):
+        await scheduler._process_stages(event)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_close_error_does_not_mask_cancellation():
+    """Generator cleanup must preserve task cancellation semantics."""
+
+    started = asyncio.Event()
+
+    class _UpstreamStage:
+        async def process(self, event):
+            del event
+            try:
+                yield
+            finally:
+                raise RuntimeError("cleanup failed")
+
+    class _BlockingStage:
+        async def process(self, event):
+            del event
+            started.set()
+            await asyncio.Future()
+
+    scheduler = object.__new__(PipelineScheduler)
+    scheduler.stages = [_UpstreamStage(), _BlockingStage()]
+    event = SimpleNamespace(is_stopped=lambda: False)
+    task = asyncio.create_task(scheduler._process_stages(event))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_agent_request_close_reaches_nested_agent_stage(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Closing the pipeline wrapper must run the concrete agent Stage cleanup."""
+
+    inner_closed = False
+
+    class _AgentStage:
+        async def process(self, event, provider_wake_prefix):
+            del event, provider_wake_prefix
+            nonlocal inner_closed
+            try:
+                yield None
+            finally:
+                inner_closed = True
+
+    async def should_process(event):
+        del event
+        return True
+
+    monkeypatch.setattr(
+        SessionServiceManager,
+        "should_process_llm_request",
+        should_process,
+    )
+    stage = AgentRequestSubStage()
+    stage.ctx = SimpleNamespace(astrbot_config={"provider_settings": {"enable": True}})
+    stage.prov_wake_prefix = ""
+    stage.agent_sub_stage = _AgentStage()
+    stream = stage.process(SimpleNamespace(unified_msg_origin="test:session"))
+
+    assert await anext(stream) is None
+    await stream.aclose()
+    assert inner_closed is True

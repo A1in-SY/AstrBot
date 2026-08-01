@@ -8,6 +8,7 @@ from astrbot.core.provider.entities import (
     LLMResponse,
     ProviderRequest,
 )
+from astrbot.core.utils.async_generator import closing_async_generator
 from astrbot.core.utils.media_utils import MediaResolver
 
 from ...hooks import BaseAgentRunHooks
@@ -100,8 +101,10 @@ class DifyAgentRunner(BaseAgentRunner[TContext]):
         self, max_step: int = 30
     ) -> T.AsyncGenerator[AgentResponse, None]:
         while not self.done():
-            async for resp in self.step():
-                yield resp
+            step_responses = self.step()
+            async with closing_async_generator(step_responses):
+                async for resp in step_responses:
+                    yield resp
 
     async def _upload_image_for_dify(
         self,

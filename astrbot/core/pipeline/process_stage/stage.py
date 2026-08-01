@@ -3,6 +3,7 @@ from collections.abc import AsyncGenerator
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.provider.entities import ProviderRequest
 from astrbot.core.star.star_handler import StarHandlerMetadata
+from astrbot.core.utils.async_generator import closing_async_generator
 
 from ..context import PipelineContext
 from ..stage import Stage, register_stage
@@ -35,19 +36,23 @@ class ProcessStage(Stage):
         )
         # 有插件 Handler 被激活
         if activated_handlers:
-            async for resp in self.star_request_sub_stage.process(event):
-                # 生成器返回值处理
-                if isinstance(resp, ProviderRequest):
-                    # Handler 的 LLM 请求
-                    event.set_extra("provider_request", resp)
-                    _t = False
-                    async for _ in self.agent_sub_stage.process(event):
-                        _t = True
+            star_request = self.star_request_sub_stage.process(event)
+            async with closing_async_generator(star_request):
+                async for resp in star_request:
+                    # 生成器返回值处理
+                    if isinstance(resp, ProviderRequest):
+                        # Handler 的 LLM 请求
+                        event.set_extra("provider_request", resp)
+                        _t = False
+                        agent_request = self.agent_sub_stage.process(event)
+                        async with closing_async_generator(agent_request):
+                            async for _ in agent_request:
+                                _t = True
+                                yield
+                        if not _t:
+                            yield
+                    else:
                         yield
-                    if not _t:
-                        yield
-                else:
-                    yield
 
         # 调用 LLM 相关请求
         if not self.ctx.astrbot_config["provider_settings"].get("enable", True):
@@ -62,5 +67,7 @@ class ProcessStage(Stage):
             if (
                 event.get_result() and not event.is_stopped()
             ) or not event.get_result():
-                async for _ in self.agent_sub_stage.process(event):
-                    yield
+                agent_request = self.agent_sub_stage.process(event)
+                async with closing_async_generator(agent_request):
+                    async for _ in agent_request:
+                        yield

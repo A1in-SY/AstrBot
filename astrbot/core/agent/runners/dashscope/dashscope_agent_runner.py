@@ -16,6 +16,7 @@ from astrbot.core.provider.entities import (
     LLMResponse,
     ProviderRequest,
 )
+from astrbot.core.utils.async_generator import closing_async_generator
 
 from ...hooks import BaseAgentRunHooks
 from ...response import AgentResponseData
@@ -120,8 +121,10 @@ class DashscopeAgentRunner(BaseAgentRunner[TContext]):
         self, max_step: int = 30
     ) -> T.AsyncGenerator[AgentResponse, None]:
         while not self.done():
-            async for resp in self.step():
-                yield resp
+            step_responses = self.step()
+            async with closing_async_generator(step_responses):
+                async for resp in step_responses:
+                    yield resp
 
     def _consume_sync_generator(
         self, response: T.Any, response_queue: queue.Queue
