@@ -358,6 +358,112 @@ async def test_plugin_cannot_impersonate_core_operations(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_trace_list_summaries_filter_roots_and_preserve_keyset_pagination(
+    tmp_path,
+):
+    """List summaries expose per-Trace counts without loading full details."""
+
+    service = TraceService(tmp_path / "trace")
+    await service.initialize()
+    try:
+        plugin_tracer = PluginTracer(service, "a1in/group-summary")
+        with plugin_tracer.start_root("group_summary.run") as root:
+            root.mark_degraded("partial_source")
+            root.add_event("summary.started")
+            root.record_text("summary.prompt", "summarize these messages")
+            root.make_link("caused_by", target_trace_id="upstream-trace")
+            with plugin_tracer.start_span("group_summary.messages.load") as load:
+                load.add_event("messages.loaded", count=2)
+                load.record_json("summary.messages", [{"id": 1}, {"id": 2}])
+                load.make_link("references", target_span_id="upstream-span")
+
+        with service.start_root("core.complete", kind="agent"):
+            pass
+
+        running_root = service.start_root("core.running", kind="agent")
+        with running_root.activate():
+            pending_span = service.start_span("core.pending", kind="tool")
+            await asyncio.sleep(0.01)
+            active_span = service.start_span("core.current", kind="model")
+        await service.flush()
+
+        plugin_summaries = await service.store.list_traces(
+            limit=10,
+            source="plugin",
+            kind="business",
+            plugin_id="a1in/group-summary",
+            status="success",
+            degraded=True,
+        )
+        assert len(plugin_summaries) == 1
+        plugin_summary = plugin_summaries[0]
+        assert plugin_summary["operation"] == "group_summary.run"
+        assert plugin_summary["span_count"] == 2
+        assert plugin_summary["event_count"] == 2
+        assert plugin_summary["artifact_count"] == 2
+        assert plugin_summary["link_count"] == 2
+        assert plugin_summary["active_span_operation"] is None
+
+        core_terminal = await service.store.list_traces(
+            limit=10,
+            source="core",
+            kind="agent",
+            status="success",
+            degraded=False,
+        )
+        assert [summary["operation"] for summary in core_terminal] == ["core.complete"]
+
+        running = await service.store.list_traces(
+            limit=10,
+            source="core",
+            kind="agent",
+            status="running",
+            degraded=False,
+        )
+        assert [summary["operation"] for summary in running] == ["core.running"]
+        assert running[0]["active_span_operation"] == active_span.operation
+
+        all_summaries = await service.store.list_traces(limit=10)
+        first_page = await service.store.list_traces(limit=2)
+        cursor = first_page[-1]
+        second_page = await service.store.list_traces(
+            limit=10,
+            before_ended_at=cursor["ended_at"] or cursor["started_at"],
+            before_trace_id=cursor["trace_id"],
+        )
+        assert [summary["trace_id"] for summary in first_page + second_page] == [
+            summary["trace_id"] for summary in all_summaries
+        ]
+
+        active_span.finish()
+        pending_span.finish()
+        running_root.finish()
+        await service.flush()
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_trace_store_creates_expression_index_for_list_order(tmp_path):
+    """The newest-first keyset order must remain indexable for polling."""
+
+    service = TraceService(tmp_path / "trace")
+    await service.initialize()
+    try:
+        db = service.store._require_read_db()
+        async with db.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+            ("traces_list_order_idx",),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        assert row is not None
+        assert "COALESCE(ended_at, started_at) DESC, trace_id DESC" in row[0]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_capacity_cleanup_compacts_in_bounded_batches(tmp_path, monkeypatch):
     """Capacity retention must compact before deciding to delete more history.
 

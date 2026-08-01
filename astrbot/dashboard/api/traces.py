@@ -90,6 +90,8 @@ async def list_traces(
     before_trace_id: str | None = Query(default=None),
     status: str | None = Query(default=None),
     operation: str | None = Query(default=None),
+    source: str | None = Query(default=None),
+    kind: str | None = Query(default=None),
     plugin_id: str | None = Query(default=None),
     degraded: bool | None = Query(default=None),
     _auth: AuthContext = Depends(require_system_scope),
@@ -104,6 +106,8 @@ async def list_traces(
             before_trace_id=before_trace_id,
             status=status,
             operation=operation,
+            source=source,
+            kind=kind,
             plugin_id=plugin_id,
             degraded=degraded,
         )

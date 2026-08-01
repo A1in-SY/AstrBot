@@ -59,6 +59,7 @@ PLUGIN_PAGE_DEMO_PAGE_NAME = "bridge-demo"
 
 def test_dashboard_trace_route_serves_spa_index() -> None:
     assert "/traces" in StaticFileService().list_index_routes()
+    assert "/traces/{trace_id}" in StaticFileService().list_index_routes()
 
 
 def _removed_md5_hint_alias_key() -> str:
@@ -1241,7 +1242,7 @@ async def test_version_endpoints_use_md5_password_hint(
 
     assert data["status"] == "ok"
     assert "md5_pwd_hint" in data["data"]
-    assert data["data"]["a1in_release"] == "a1in-v4.26.8.4"
+    assert data["data"]["a1in_release"] == "a1in-v4.26.8.5"
     assert data["data"]["a1in_upstream_base"] == "v4.26.8"
     assert _removed_md5_hint_alias_key() not in data["data"]
 
@@ -1253,7 +1254,7 @@ async def test_version_endpoints_use_md5_password_hint(
 
     assert data["status"] == "ok"
     assert "md5_pwd_hint" in data["data"]
-    assert data["data"]["a1in_release"] == "a1in-v4.26.8.4"
+    assert data["data"]["a1in_release"] == "a1in-v4.26.8.5"
     assert data["data"]["a1in_upstream_base"] == "v4.26.8"
     assert _removed_md5_hint_alias_key() not in data["data"]
 
@@ -1270,7 +1271,7 @@ async def test_public_versions_endpoint_does_not_require_auth(app: FastAPIAppAda
     assert data["data"]["astrbot_version"]
     assert "webui_version" in data["data"]
     assert "astrbot_code_version" in data["data"]
-    assert data["data"]["a1in_release"] == "a1in-v4.26.8.4"
+    assert data["data"]["a1in_release"] == "a1in-v4.26.8.5"
     assert data["data"]["a1in_upstream_base"] == "v4.26.8"
     assert "change_pwd_hint" not in data["data"]
     assert "md5_pwd_hint" not in data["data"]

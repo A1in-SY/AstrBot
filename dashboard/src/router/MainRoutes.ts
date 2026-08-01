@@ -128,6 +128,12 @@ const MainRoutes = {
       path: '/traces',
       component: () => import('@/views/ExecutionTracePage.vue')
     },
+    {
+      name: 'ExecutionTraceDetail',
+      path: '/traces/:traceId',
+      component: () => import('@/views/ExecutionTraceDetailPage.vue'),
+      props: true
+    },
 
     // 旧版本的知识库路由
     {

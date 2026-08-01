@@ -4854,6 +4854,14 @@ paths:
           in: query
           schema:
             type: string
+        - name: source
+          in: query
+          schema:
+            type: string
+        - name: kind
+          in: query
+          schema:
+            type: string
         - name: plugin_id
           in: query
           schema:
@@ -4864,7 +4872,11 @@ paths:
             type: boolean
       responses:
         "200":
-          $ref: "#/components/responses/Ok"
+          description: Execution trace summaries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutionTraceListEnvelope"
     delete:
       tags: [Execution Trace]
       summary: Clear terminal execution traces
@@ -6386,6 +6398,97 @@ components:
       properties:
         proxy_url:
           type: string
+      additionalProperties: false
+
+    ExecutionTraceListEnvelope:
+      type: object
+      required: [status, data]
+      properties:
+        status:
+          type: string
+          const: ok
+        message:
+          type: [string, "null"]
+        data:
+          $ref: "#/components/schemas/ExecutionTraceListData"
+      additionalProperties: false
+
+    ExecutionTraceListData:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExecutionTraceListItem"
+      additionalProperties: false
+
+    ExecutionTraceListItem:
+      type: object
+      required:
+        - trace_id
+        - root_span_id
+        - operation
+        - kind
+        - source
+        - started_at
+        - status
+        - degraded
+        - revision
+        - span_count
+        - event_count
+        - artifact_count
+        - link_count
+      properties:
+        trace_id:
+          type: string
+        root_span_id:
+          type: string
+        operation:
+          type: string
+        kind:
+          type: string
+        source:
+          type: string
+        plugin_id:
+          type: [string, "null"]
+        started_at:
+          type: number
+        ended_at:
+          type: [number, "null"]
+        status:
+          type: string
+        outcome:
+          type: [string, "null"]
+        degraded:
+          type: boolean
+        degradation_reasons:
+          type: array
+          items:
+            type: string
+        attributes:
+          type: object
+          additionalProperties: true
+        revision:
+          type: integer
+        dropped:
+          type: object
+          additionalProperties:
+            type: integer
+        span_count:
+          type: integer
+          minimum: 0
+        event_count:
+          type: integer
+          minimum: 0
+        artifact_count:
+          type: integer
+          minimum: 0
+        link_count:
+          type: integer
+          minimum: 0
+        active_span_operation:
+          type: [string, "null"]
       additionalProperties: false
 
     ExecutionTraceConfigRequest:
