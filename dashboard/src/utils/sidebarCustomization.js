@@ -51,6 +51,13 @@ export function clearSidebarCustomization() {
  */
 import { MORE_GROUP_KEY } from "@/layouts/full/vertical-sidebar/sidebarItem";
 
+// These entries represent product-level navigation, not user-optional items.
+// Keep them in the main section when a saved customization predates a layout
+// change (for example, Trace moved out of the old More group).
+const REQUIRED_MAIN_ITEM_KEYS = new Set([
+  'core.navigation.trace'
+]);
+
 export function resolveSidebarItems(defaultItems, customization, options = {}) {
   const { cloneItems = false, assembleMoreGroup = false } = options;
 
@@ -93,6 +100,35 @@ export function resolveSidebarItems(defaultItems, customization, options = {}) {
   if (hasCustomization) {
     mainKeys = mainKeys.filter(title => all.has(title));
     moreKeys = moreKeys.filter(title => all.has(title));
+
+    const requiredMainKeys = defaultMain.filter(title => REQUIRED_MAIN_ITEM_KEYS.has(title));
+    if (requiredMainKeys.length > 0) {
+      const requiredMainKeySet = new Set(requiredMainKeys);
+      mainKeys = mainKeys.filter(title => !requiredMainKeySet.has(title));
+      moreKeys = moreKeys.filter(title => !requiredMainKeySet.has(title));
+
+      requiredMainKeys.forEach((title) => {
+        const defaultIndex = defaultMain.indexOf(title);
+        const nextMainKey = defaultMain
+          .slice(defaultIndex + 1)
+          .find(candidate => mainKeys.includes(candidate));
+        if (nextMainKey) {
+          mainKeys.splice(mainKeys.indexOf(nextMainKey), 0, title);
+          return;
+        }
+
+        const previousMainKey = defaultMain
+          .slice(0, defaultIndex)
+          .reverse()
+          .find(candidate => mainKeys.includes(candidate));
+        if (previousMainKey) {
+          mainKeys.splice(mainKeys.indexOf(previousMainKey) + 1, 0, title);
+          return;
+        }
+
+        mainKeys.push(title);
+      });
+    }
   }
 
   if (hasCustomization) {

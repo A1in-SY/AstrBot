@@ -34,13 +34,13 @@ A1in fork 负责私有功能、发布、镜像、部署和回滚。
 
 一个 A1in release 同时包含“官方兼容版本”和“A1in 发行版本”。两者不能互相覆盖。
 
-| 字段 | 位置 | 语义 | `a1in-v4.26.8.3` 示例 |
+| 字段 | 位置 | 语义 | `a1in-v4.26.8.4` 示例 |
 | --- | --- | --- | --- |
 | 官方 Git 基线 | 官方 annotated tag | 吸收上游变更的稳定边界 | `v4.26.8` |
 | 上游兼容版本 | `astrbot/__init__.py` 的 `__version__` | 插件、备份、Dashboard 兼容和官方 API 基线 | `4.26.8` |
 | Python 包版本 | `pyproject.toml` 的 `[project].version` | 必须与 `__version__` 相同 | `4.26.8` |
-| A1in 发行版本 | `astrbot/a1in_release.py` 的 `A1IN_RELEASE` | A1in source release 的唯一源码内身份 | `a1in-v4.26.8.3` |
-| A1in 发行修订号 | `A1IN_RELEASE_REVISION` | 同一官方基线内的 A1in release 序号 | `3` |
+| A1in 发行版本 | `astrbot/a1in_release.py` 的 `A1IN_RELEASE` | A1in source release 的唯一源码内身份 | `a1in-v4.26.8.4` |
+| A1in 发行修订号 | `A1IN_RELEASE_REVISION` | 同一官方基线内的 A1in release 序号 | `4` |
 | 上游基线 tag | `A1IN_UPSTREAM_BASE_TAG` | 由 `__version__` 推导的官方 tag | `v4.26.8` |
 
 更新官方版本时，必须同步更新 `pyproject.toml` 与 `astrbot/__init__.py`。不要把 A1in release string 写进 `__version__`：该字段仍被 Dashboard 下载、插件兼容、备份和版本比较逻辑使用。
@@ -57,7 +57,7 @@ Immutable deployment: ghcr.io/a1in-sy/astrbot@sha256:<digest>
 
 | 场景 | Git tag | Human image tag |
 | --- | --- | --- |
-| 官方 `v4.26.8` 上的第 3 个 A1in release | `a1in-v4.26.8.3` | `v4.26.8-a1in.3` |
+| 官方 `v4.26.8` 上的第 4 个 A1in release | `a1in-v4.26.8.4` | `v4.26.8-a1in.4` |
 | 官方 `v4.26.9` 同步完成后的第一个 A1in release | `a1in-v4.26.9.1` | `v4.26.9-a1in.1` |
 | 官方未来 `v4.27.0` 同步完成后的第一个 A1in release | `a1in-v4.27.0.1` | `v4.27.0-a1in.1` |
 
@@ -69,7 +69,7 @@ Immutable deployment: ghcr.io/a1in-sy/astrbot@sha256:<digest>
 
 ```text
 Upstream compatibility: v4.26.8
-A1in release:           a1in-v4.26.8.3
+A1in release:           a1in-v4.26.8.4
 Source revision:         <image build commit>
 Execution Trace:         Core-managed
 ```
@@ -81,9 +81,9 @@ Dashboard 有两个不同的版本文件：
 | 文件 | 值 | 用途 |
 | --- | --- | --- |
 | `dist/assets/version` | 官方兼容 tag，例如 `v4.26.8` | Core 与 Dashboard 的兼容性判定 |
-| `dist/assets/a1in-release` | A1in release tag，例如 `a1in-v4.26.8.3` | 构建产物身份与排障 |
+| `dist/assets/a1in-release` | A1in release tag，例如 `a1in-v4.26.8.4` | 构建产物身份、排障和持久化 Dashboard 缓存校验 |
 
-不得把 `a1in-v...` 写进 `dist/assets/version`。该文件必须继续与 Core 的官方兼容版本匹配，否则 Core 会把已捆绑 Dashboard 误判为版本不兼容。
+不得把 `a1in-v...` 写进 `dist/assets/version`。该文件必须继续与 Core 的官方兼容版本匹配，否则 Core 会把已捆绑 Dashboard 误判为版本不兼容。对于 A1in 管理的镜像，若持久化 `data/dist` 的 `assets/a1in-release` 缺失或与镜像 bundled Dashboard 不一致，启动时必须用 bundled Dashboard 替换它；仅匹配官方兼容版本不足以证明前端与当前 A1in 修订版一致。
 
 ## 5. 官方自更新策略
 
@@ -105,7 +105,7 @@ A1in release 默认不允许 Core 或 Dashboard 从官方 AstrBot 源自动下�
 2. 完成实现、审查、Core 测试、Dashboard 检查和插件兼容测试。
 3. 合并到 `master`。
 4. 在 `release/<topic>` 上更新 `astrbot/a1in_release.py` 的正式 release 值并完成最终验证。
-5. 将 release branch 合并到 `master`，创建 annotated tag，例如 `a1in-v4.26.8.3`。
+5. 将 release branch 合并到 `master`，创建 annotated tag，例如 `a1in-v4.26.8.4`。
 6. 只推送该 tag，让 `.github/workflows/a1in-release-image.yml` 构建多架构镜像。
 7. 校验 OCI labels、source revision、Dashboard compatibility version 和最终 image digest。
 8. 部署时只改为已验证的 digest；保留当前 digest 和 rollback material。

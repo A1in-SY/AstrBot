@@ -24,6 +24,7 @@ class StaticFileService:
         "/extension-marketplace",
         "/conversation",
         "/tool-use",
+        "/traces",
     )
     NOT_FOUND_MESSAGE = (
         "404 Not found。如果你初次使用打开面板发现 404, 请参考文档: "

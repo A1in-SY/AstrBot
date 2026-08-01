@@ -387,6 +387,32 @@ def get_dashboard_dist_version(dist_dir: str | Path) -> str | None:
     return None
 
 
+def get_dashboard_dist_a1in_release(dist_dir: str | Path) -> str | None:
+    """Read the optional A1in release marker from a dashboard dist directory.
+
+    The upstream-compatible version in ``assets/version`` deliberately remains
+    unchanged across A1in revisions.  A managed release therefore writes this
+    separate marker so a persisted ``data/dist`` from an earlier A1in revision
+    cannot mask a newer bundled dashboard.
+
+    Args:
+        dist_dir: Dashboard dist directory path.
+
+    Returns:
+        The A1in release tag from ``assets/a1in-release``, or ``None`` when the
+        dist is not an A1in-managed bundle.
+    """
+
+    release_file = Path(dist_dir) / "assets" / "a1in-release"
+    try:
+        if release_file.exists():
+            release = release_file.read_text(encoding="utf-8").strip()
+            return release or None
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("Failed to read A1in WebUI release from %s: %s", release_file, exc)
+    return None
+
+
 def get_bundled_dashboard_dist_path() -> Path:
     return Path(get_astrbot_path()) / "astrbot" / "dashboard" / "dist"
 
@@ -432,21 +458,32 @@ def is_dashboard_version_compatible(
         return False
 
 
-def is_dashboard_dist_compatible(dist_dir: str | Path, current_version: str) -> bool:
-    """Check whether a WebUI dist is complete and matches the core version.
+def is_dashboard_dist_compatible(
+    dist_dir: str | Path,
+    current_version: str,
+    expected_a1in_release: str | None = None,
+) -> bool:
+    """Check whether a WebUI dist is complete and compatible with this runtime.
 
     Args:
         dist_dir: Dashboard dist directory path.
         current_version: Current AstrBot core version.
+        expected_a1in_release: Optional managed-release marker expected in the
+            dist. When omitted, only the upstream-compatible version is checked.
 
     Returns:
-        True when the dist has an index file and a compatible assets/version.
+        True when the dist has an index file, a compatible ``assets/version``,
+        and, when requested, the expected A1in release marker.
     """
 
     dist_path = Path(dist_dir)
-    return (dist_path / "index.html").is_file() and is_dashboard_version_compatible(
+    if not (dist_path / "index.html").is_file() or not is_dashboard_version_compatible(
         get_dashboard_dist_version(dist_path),
         current_version,
+    ):
+        return False
+    return expected_a1in_release is None or (
+        get_dashboard_dist_a1in_release(dist_path) == expected_a1in_release
     )
 
 
@@ -465,19 +502,17 @@ def should_use_bundled_dashboard_dist(
     """
 
     user_dist = Path(user_dist)
-    user_version = get_dashboard_dist_version(user_dist)
     bundled_dist = get_bundled_dashboard_dist_path()
     if not user_dist.exists() or not is_dashboard_dist_compatible(
         bundled_dist,
         current_version,
     ):
         return False
-    if user_version is None or not (user_dist / "index.html").is_file():
-        return True
-    try:
-        return not is_dashboard_version_compatible(user_version, current_version)
-    except (TypeError, ValueError):
-        return False
+    return not is_dashboard_dist_compatible(
+        user_dist,
+        current_version,
+        expected_a1in_release=get_dashboard_dist_a1in_release(bundled_dist),
+    )
 
 
 async def get_dashboard_version():
@@ -492,17 +527,21 @@ async def get_dashboard_version():
 
     # First check user data directory (manually updated / downloaded dashboard).
     dist_dir = os.path.join(get_astrbot_data_path(), "dist")
+    bundled = get_bundled_dashboard_dist_path()
+    expected_a1in_release = get_dashboard_dist_a1in_release(bundled)
     if os.path.exists(dist_dir):
         user_version = get_dashboard_dist_version(dist_dir)
-        if is_dashboard_dist_compatible(dist_dir, VERSION):
+        if is_dashboard_dist_compatible(
+            dist_dir,
+            VERSION,
+            expected_a1in_release=expected_a1in_release,
+        ):
             return user_version
 
-        bundled = get_bundled_dashboard_dist_path()
         if is_dashboard_dist_compatible(bundled, VERSION):
             return get_dashboard_dist_version(bundled)
         return user_version
 
-    bundled = get_bundled_dashboard_dist_path()
     if is_dashboard_dist_compatible(bundled, VERSION):
         return get_dashboard_dist_version(bundled)
     return None
