@@ -47,6 +47,7 @@ from astrbot.core.utils.astrbot_path import (  # noqa: E402
 from astrbot.core.utils.io import (  # noqa: E402
     download_dashboard,
     get_bundled_dashboard_dist_path,
+    get_dashboard_dist_a1in_release,
     get_dashboard_dist_version,
     is_dashboard_dist_compatible,
     is_dashboard_version_compatible,
@@ -113,15 +114,20 @@ async def check_dashboard_files(webui_dir: str | None = None):
 
     data_dist_path = Path(get_astrbot_data_path()) / "dist"
     bundled_dist = get_bundled_dashboard_dist_path()
+    expected_a1in_release = get_dashboard_dist_a1in_release(bundled_dist)
     if data_dist_path.exists():
         v = get_dashboard_dist_version(data_dist_path)
-        if is_dashboard_dist_compatible(data_dist_path, VERSION):
+        if is_dashboard_dist_compatible(
+            data_dist_path,
+            VERSION,
+            expected_a1in_release=expected_a1in_release,
+        ):
             logger.info("WebUI is up to date.")
             return str(data_dist_path)
 
         if should_use_bundled_dashboard_dist(data_dist_path, VERSION):
             logger.info(
-                "Replacing data/dist with bundled WebUI because its version does not match core version v%s.",
+                "Replacing data/dist with bundled WebUI because it does not match the current dashboard release for core v%s.",
                 VERSION,
             )
             try:

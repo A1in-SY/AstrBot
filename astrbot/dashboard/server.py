@@ -22,6 +22,7 @@ from astrbot.core.db import BaseDatabase
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.utils.io import (
     get_bundled_dashboard_dist_path,
+    get_dashboard_dist_a1in_release,
     get_dashboard_dist_version,
     get_local_ip_addresses,
     is_dashboard_dist_compatible,
@@ -191,10 +192,12 @@ class AstrBotDashboard:
         else:
             user_dist = os.path.join(get_astrbot_data_path(), "dist")
             bundled_dist = get_bundled_dashboard_dist_path()
+            expected_a1in_release = get_dashboard_dist_a1in_release(bundled_dist)
             user_version = get_dashboard_dist_version(user_dist)
             if os.path.exists(user_dist) and is_dashboard_dist_compatible(
                 user_dist,
                 VERSION,
+                expected_a1in_release=expected_a1in_release,
             ):
                 self.data_path = os.path.abspath(user_dist)
             elif should_use_bundled_dashboard_dist(

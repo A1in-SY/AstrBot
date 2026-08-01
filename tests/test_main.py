@@ -9,7 +9,10 @@ from unittest import mock
 
 import pytest
 
-from astrbot.core.utils.io import get_dashboard_version, should_use_bundled_dashboard_dist
+from astrbot.core.utils.io import (
+    get_dashboard_version,
+    should_use_bundled_dashboard_dist,
+)
 from main import (
     DASHBOARD_RESET_PASSWORD_ENV,
     _apply_startup_env_flags,
@@ -360,6 +363,30 @@ def test_should_use_bundled_dashboard_dist_when_data_version_file_is_missing(tmp
         assert should_use_bundled_dashboard_dist(user_dist, "4.24.4") is True
 
 
+def test_should_use_bundled_dashboard_dist_when_a1in_release_marker_differs(tmp_path):
+    """An A1in revision must replace a cached dist on the same upstream version."""
+    user_dist = tmp_path / "user-dist"
+    bundled_dist = tmp_path / "bundled-dist"
+    (user_dist / "assets").mkdir(parents=True)
+    (bundled_dist / "assets").mkdir(parents=True)
+    (user_dist / "assets" / "version").write_text("v4.24.4", encoding="utf-8")
+    (bundled_dist / "assets" / "version").write_text("v4.24.4", encoding="utf-8")
+    (user_dist / "assets" / "a1in-release").write_text(
+        "a1in-v4.24.4.1", encoding="utf-8"
+    )
+    (bundled_dist / "assets" / "a1in-release").write_text(
+        "a1in-v4.24.4.2", encoding="utf-8"
+    )
+    (user_dist / "index.html").write_text("stale", encoding="utf-8")
+    (bundled_dist / "index.html").write_text("bundled", encoding="utf-8")
+
+    with mock.patch(
+        "astrbot.core.utils.io.get_bundled_dashboard_dist_path",
+        return_value=bundled_dist,
+    ):
+        assert should_use_bundled_dashboard_dist(user_dist, "v4.24.4") is True
+
+
 @pytest.mark.asyncio
 async def test_get_dashboard_version_uses_bundled_dist_when_data_dist_is_missing(
     tmp_path,
@@ -417,6 +444,51 @@ async def test_check_dashboard_files_replaces_stale_data_dist_with_bundled_dist(
     assert (data_dist / "assets" / "version").read_text(encoding="utf-8") == f"v{VERSION}"
     assert (data_dist / "index.html").read_text(encoding="utf-8") == "bundled"
     assert not (data_dist / "old.txt").exists()
+    mock_download.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_check_dashboard_files_replaces_same_version_data_dist_when_a1in_marker_differs(
+    tmp_path,
+):
+    """A cached upstream-compatible WebUI cannot mask a newer A1in dashboard."""
+    from main import VERSION
+
+    data_dir = tmp_path / "data"
+    data_dist = data_dir / "dist"
+    bundled_dist = tmp_path / "bundled-dist"
+    (data_dist / "assets").mkdir(parents=True)
+    (bundled_dist / "assets").mkdir(parents=True)
+    (data_dist / "assets" / "version").write_text(f"v{VERSION}", encoding="utf-8")
+    (bundled_dist / "assets" / "version").write_text(
+        f"v{VERSION}", encoding="utf-8"
+    )
+    (data_dist / "assets" / "a1in-release").write_text(
+        "a1in-v4.26.8.2", encoding="utf-8"
+    )
+    (bundled_dist / "assets" / "a1in-release").write_text(
+        "a1in-v4.26.8.3", encoding="utf-8"
+    )
+    (data_dist / "index.html").write_text("stale", encoding="utf-8")
+    (bundled_dist / "index.html").write_text("bundled", encoding="utf-8")
+
+    with mock.patch("main.get_astrbot_data_path", return_value=str(data_dir)):
+        with mock.patch(
+            "main.get_bundled_dashboard_dist_path",
+            return_value=Path(bundled_dist),
+        ):
+            with mock.patch(
+                "astrbot.core.utils.io.get_bundled_dashboard_dist_path",
+                return_value=Path(bundled_dist),
+            ):
+                with mock.patch("main.download_dashboard") as mock_download:
+                    result = await check_dashboard_files()
+
+    assert result == str(data_dist)
+    assert (data_dist / "index.html").read_text(encoding="utf-8") == "bundled"
+    assert (data_dist / "assets" / "a1in-release").read_text(
+        encoding="utf-8"
+    ) == "a1in-v4.26.8.3"
     mock_download.assert_not_called()
 
 
