@@ -8,7 +8,9 @@ import pytest
 from astrbot.core.tools.cron_tools import FutureTaskTool
 
 
-def _context(cron_mgr, *, umo: str = "test:group:shared", sender_id: str = "user-1"):
+def _context(
+    cron_mgr, *, umo: str = "Sy:FriendMessage:123456", sender_id: str = "user-1"
+):
     return SimpleNamespace(
         context=SimpleNamespace(
             context=SimpleNamespace(cron_manager=cron_mgr),
@@ -20,7 +22,9 @@ def _context(cron_mgr, *, umo: str = "test:group:shared", sender_id: str = "user
     )
 
 
-def _job(job_id: str, *, umo: str = "test:group:shared", sender_id: str = "user-1"):
+def _job(
+    job_id: str, *, umo: str = "Sy:FriendMessage:123456", sender_id: str = "user-1"
+):
     return SimpleNamespace(
         job_id=job_id,
         name=f"name-{job_id}",
@@ -80,7 +84,7 @@ async def test_future_task_edit_requires_job_id():
         context=SimpleNamespace(
             context=SimpleNamespace(cron_manager=cron_mgr),
             event=SimpleNamespace(
-                unified_msg_origin="test:private:session",
+                unified_msg_origin="Sy:FriendMessage:123456",
                 get_sender_id=lambda: "user-1",
             ),
         )
@@ -102,7 +106,7 @@ async def test_future_task_edit_updates_existing_job():
         run_once=False,
         cron_expression="0 8 * * *",
         payload={
-            "session": "test:private:session",
+            "session": "Sy:FriendMessage:123456",
             "sender_id": "user-1",
             "note": "old note",
             "origin": "tool",
@@ -123,7 +127,7 @@ async def test_future_task_edit_updates_existing_job():
         context=SimpleNamespace(
             context=SimpleNamespace(cron_manager=cron_mgr),
             event=SimpleNamespace(
-                unified_msg_origin="test:private:session",
+                unified_msg_origin="Sy:FriendMessage:123456",
                 get_sender_id=lambda: "user-1",
             ),
         )
@@ -146,7 +150,7 @@ async def test_future_task_edit_updates_existing_job():
         run_once=True,
         cron_expression=None,
         payload={
-            "session": "test:private:session",
+            "session": "Sy:FriendMessage:123456",
             "sender_id": "user-1",
             "note": "new note",
             "origin": "tool",
@@ -205,7 +209,7 @@ async def test_future_task_list_filters_by_umo_and_sender():
     same_umo_other_sender = _job("other-sender-job", sender_id="user-2")
     different_umo_same_sender = _job(
         "other-umo-job",
-        umo="test:group:other",
+        umo="Sy:FriendMessage:999999",
         sender_id="user-1",
     )
     cron_mgr = SimpleNamespace(
@@ -215,10 +219,94 @@ async def test_future_task_list_filters_by_umo_and_sender():
     )
 
     result = await tool.call(
-        _context(cron_mgr, sender_id="user-1"),
+        _context(cron_mgr, umo="Sy:FriendMessage:123456", sender_id="user-1"),
         action="list",
     )
 
     assert "own-job" in result
     assert "other-sender-job" not in result
     assert "other-umo-job" not in result
+
+
+@pytest.mark.asyncio
+async def test_future_task_edit_allows_any_member_for_group_job():
+    """Group jobs belong to the group session, not to the creator."""
+    tool = FutureTaskTool()
+    existing_job = _job("job-1", umo="Sy:GroupMessage:253016320", sender_id="creator-a")
+    cron_mgr = SimpleNamespace(
+        db=SimpleNamespace(get_cron_job=AsyncMock(return_value=existing_job)),
+        update_job=AsyncMock(
+            return_value=SimpleNamespace(
+                job_id="job-1",
+                name="name-job-1",
+            )
+        ),
+    )
+
+    result = await tool.call(
+        _context(cron_mgr, umo="Sy:GroupMessage:253016320", sender_id="member-b"),
+        action="edit",
+        job_id="job-1",
+        note="new note",
+    )
+
+    cron_mgr.update_job.assert_awaited_once()
+    assert result == "Updated future task job-1 (name-job-1)."
+
+
+@pytest.mark.asyncio
+async def test_future_task_delete_allows_any_member_for_group_job():
+    """Any member of the group can delete a group job."""
+    tool = FutureTaskTool()
+    existing_job = _job("job-1", umo="Sy:GroupMessage:253016320", sender_id="creator-a")
+    cron_mgr = SimpleNamespace(
+        db=SimpleNamespace(get_cron_job=AsyncMock(return_value=existing_job)),
+        delete_job=AsyncMock(),
+    )
+
+    result = await tool.call(
+        _context(cron_mgr, umo="Sy:GroupMessage:253016320", sender_id="member-b"),
+        action="delete",
+        job_id="job-1",
+    )
+
+    cron_mgr.delete_job.assert_awaited_once_with("job-1")
+    assert result == "Deleted cron job job-1."
+
+
+@pytest.mark.asyncio
+async def test_future_task_list_group_tasks_visible_to_all_members():
+    """Group jobs are visible to any member of the same group."""
+    tool = FutureTaskTool()
+    group_job = _job(
+        "group-job", umo="Sy:GroupMessage:253016320", sender_id="creator-a"
+    )
+    private_job = _job("private-job", umo="Sy:FriendMessage:123456", sender_id="user-1")
+    cron_mgr = SimpleNamespace(
+        list_jobs=AsyncMock(return_value=[group_job, private_job])
+    )
+
+    result = await tool.call(
+        _context(cron_mgr, umo="Sy:GroupMessage:253016320", sender_id="member-b"),
+        action="list",
+    )
+
+    assert "group-job" in result
+    assert "private-job" not in result
+
+
+@pytest.mark.asyncio
+async def test_future_task_list_group_job_invisible_from_private_chat():
+    """Group jobs must not leak into private-chat lists."""
+    tool = FutureTaskTool()
+    group_job = _job(
+        "group-job", umo="Sy:GroupMessage:253016320", sender_id="creator-a"
+    )
+    cron_mgr = SimpleNamespace(list_jobs=AsyncMock(return_value=[group_job]))
+
+    result = await tool.call(
+        _context(cron_mgr, umo="Sy:FriendMessage:123456", sender_id="creator-a"),
+        action="list",
+    )
+
+    assert result == "No cron jobs found."

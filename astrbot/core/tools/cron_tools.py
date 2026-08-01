@@ -8,6 +8,8 @@ from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 from astrbot.core.cron.manager import CronJobSchedulingError
+from astrbot.core.platform.message_session import MessageSession
+from astrbot.core.platform.message_type import MessageType
 from astrbot.core.tools.registry import builtin_tool
 
 _CRON_TOOL_CONFIG = {
@@ -31,13 +33,34 @@ def _extract_job_sender(job: Any) -> str | None:
     return str(sender_id) if sender_id is not None else None
 
 
-def _job_belongs_to_current_sender(
-    job: Any, current_umo: str, current_sender_id: str
-) -> bool:
-    return (
-        _extract_job_session(job) == current_umo
-        and _extract_job_sender(job) == current_sender_id
-    )
+def _job_manageable_by(job: Any, current_umo: str, current_sender_id: str) -> bool:
+    """Check whether the current caller may manage a cron job.
+
+    Group-chat jobs belong to the group session, so any member of the same
+    group can manage them. Private-chat jobs remain bound to the creator.
+
+    Args:
+        job: The cron job to check.
+        current_umo: The unified message origin of the current event.
+        current_sender_id: The sender ID of the current event.
+
+    Returns:
+        True if the caller may manage the job.
+    """
+    job_session = _extract_job_session(job)
+    if not job_session:
+        return False
+    is_group_job = False
+    try:
+        is_group_job = (
+            MessageSession.from_str(job_session).message_type
+            == MessageType.GROUP_MESSAGE
+        )
+    except ValueError:
+        is_group_job = False
+    if is_group_job:
+        return job_session == current_umo
+    return job_session == current_umo and _extract_job_sender(job) == current_sender_id
 
 
 def _parse_run_at(run_at: Any) -> datetime | None:
@@ -164,7 +187,7 @@ class FutureTaskTool(FunctionTool[AstrAgentContext]):
             job = await cron_mgr.db.get_cron_job(str(job_id))
             if not job:
                 return f"error: cron job {job_id} not found."
-            if not _job_belongs_to_current_sender(job, current_umo, current_sender_id):
+            if not _job_manageable_by(job, current_umo, current_sender_id):
                 return "error: you can only edit your own future tasks."
 
             payload = dict(job.payload) if isinstance(job.payload, dict) else {}
@@ -232,7 +255,7 @@ class FutureTaskTool(FunctionTool[AstrAgentContext]):
             job = await cron_mgr.db.get_cron_job(str(job_id))
             if not job:
                 return f"error: cron job {job_id} not found."
-            if not _job_belongs_to_current_sender(job, current_umo, current_sender_id):
+            if not _job_manageable_by(job, current_umo, current_sender_id):
                 return "error: you can only delete your own future tasks."
             await cron_mgr.delete_job(str(job_id))
             return f"Deleted cron job {job_id}."
@@ -241,7 +264,7 @@ class FutureTaskTool(FunctionTool[AstrAgentContext]):
             jobs = [
                 job
                 for job in await cron_mgr.list_jobs()
-                if _job_belongs_to_current_sender(job, current_umo, current_sender_id)
+                if _job_manageable_by(job, current_umo, current_sender_id)
             ]
             if not jobs:
                 return "No cron jobs found."
