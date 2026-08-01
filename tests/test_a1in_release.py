@@ -25,8 +25,8 @@ def test_a1in_release_identity_tracks_the_upstream_compatibility_version(
 
     identity = get_a1in_release_identity()
 
-    assert A1IN_RELEASE == "a1in-v4.26.8.6"
-    assert A1IN_RELEASE_REVISION == 6
+    assert A1IN_RELEASE == "a1in-v4.26.8.8"
+    assert A1IN_RELEASE_REVISION == 8
     assert A1IN_UPSTREAM_BASE_TAG == f"v{__version__}"
     assert identity["a1in_release"] == A1IN_RELEASE
     assert identity["a1in_upstream_base"] == A1IN_UPSTREAM_BASE_TAG
