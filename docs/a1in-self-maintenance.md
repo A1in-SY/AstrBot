@@ -113,7 +113,7 @@ A1in release 默认不允许 Core 或 Dashboard 从官方 AstrBot 源自动下�
 9. 生产 compose 使用唯一 local image tag 并禁止 pull；保留上一版 compose、image 和回滚数据。
 10. 验证完成后删除短期 release branch。
 
-release 流程必须验证：Git tag、`A1IN_RELEASE`、`A1IN_RELEASE_REVISION`、`A1IN_UPSTREAM_BASE_TAG` 和官方基线 tag 一致。`.github/workflows/a1in-release-image.yml` 仅允许维护者手动触发；手动运行时必须填写精确的 `release_tag`，workflow 会 checkout 该 annotated tag。它不参与默认生产发布，也不发布 `latest`。
+release 流程必须验证：Git tag、`A1IN_RELEASE`、`A1IN_RELEASE_REVISION`、`A1IN_UPSTREAM_BASE_TAG` 和官方基线 tag 一致。推送 `master` 与 annotated tag 后，若需要归档 GHCR 镜像，再在 Actions 选择 `master` 并手动填写精确的 `release_tag`；tag push 本身不会触发该 workflow。workflow 会 checkout 输入的 annotated tag。它不参与默认生产发布，也不发布 `latest`。
 
 ## 7. 同步新的官方稳定版本
 
