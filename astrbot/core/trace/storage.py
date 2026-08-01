@@ -99,10 +99,16 @@ class TraceStore:
 
             CREATE INDEX IF NOT EXISTS traces_list_idx
             ON traces (ended_at DESC, trace_id DESC);
+            CREATE INDEX IF NOT EXISTS traces_list_order_idx
+            ON traces (COALESCE(ended_at, started_at) DESC, trace_id DESC);
             CREATE INDEX IF NOT EXISTS traces_status_idx
             ON traces (status, ended_at DESC, trace_id DESC);
             CREATE INDEX IF NOT EXISTS traces_operation_idx
             ON traces (operation, ended_at DESC, trace_id DESC);
+            CREATE INDEX IF NOT EXISTS traces_source_idx
+            ON traces (source, ended_at DESC, trace_id DESC);
+            CREATE INDEX IF NOT EXISTS traces_kind_idx
+            ON traces (kind, ended_at DESC, trace_id DESC);
             CREATE INDEX IF NOT EXISTS traces_plugin_idx
             ON traces (plugin_id, ended_at DESC, trace_id DESC);
 
@@ -126,6 +132,8 @@ class TraceStore:
 
             CREATE INDEX IF NOT EXISTS spans_trace_parent_idx
             ON spans (trace_id, parent_span_id, started_at, span_id);
+            CREATE INDEX IF NOT EXISTS spans_trace_status_started_idx
+            ON spans (trace_id, status, started_at DESC, span_id DESC);
 
             CREATE TABLE IF NOT EXISTS events (
                 trace_id TEXT NOT NULL REFERENCES traces(trace_id) ON DELETE CASCADE,
@@ -519,29 +527,42 @@ class TraceStore:
         before_trace_id: str | None = None,
         status: str | None = None,
         operation: str | None = None,
+        source: str | None = None,
+        kind: str | None = None,
         plugin_id: str | None = None,
         degraded: bool | None = None,
     ) -> list[dict[str, Any]]:
-        """Return a keyset-paginated trace list in newest-first order."""
+        """Return generic Trace summaries in stable newest-first order.
+
+        The summary counts are scoped to each Trace.  ``artifact_count`` is
+        the number of Artifact references in that Trace, rather than the
+        number of unique content-addressed objects shared across all Traces.
+        """
 
         clauses: list[str] = []
         values: list[Any] = []
         if status:
-            clauses.append("status = ?")
+            clauses.append("t.status = ?")
             values.append(status)
         if operation:
-            clauses.append("operation = ?")
+            clauses.append("t.operation = ?")
             values.append(operation)
+        if source:
+            clauses.append("t.source = ?")
+            values.append(source)
+        if kind:
+            clauses.append("t.kind = ?")
+            values.append(kind)
         if plugin_id:
-            clauses.append("plugin_id = ?")
+            clauses.append("t.plugin_id = ?")
             values.append(plugin_id)
         if degraded is not None:
-            clauses.append("degraded = ?")
+            clauses.append("t.degraded = ?")
             values.append(int(degraded))
         if before_ended_at is not None and before_trace_id:
             clauses.append(
-                "(COALESCE(ended_at, started_at) < ? OR "
-                "(COALESCE(ended_at, started_at) = ? AND trace_id < ?))"
+                "(COALESCE(t.ended_at, t.started_at) < ? OR "
+                "(COALESCE(t.ended_at, t.started_at) = ? AND t.trace_id < ?))"
             )
             values.extend([before_ended_at, before_ended_at, before_trace_id])
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -550,8 +571,37 @@ class TraceStore:
             rows = await _fetch_all(
                 self._require_read_db(),
                 f"""
-                SELECT * FROM traces {where}
-                ORDER BY COALESCE(ended_at, started_at) DESC, trace_id DESC
+                SELECT
+                    t.*,
+                    (
+                        SELECT COUNT(*)
+                        FROM spans AS s
+                        WHERE s.trace_id = t.trace_id
+                    ) AS span_count,
+                    (
+                        SELECT COUNT(*)
+                        FROM events AS e
+                        WHERE e.trace_id = t.trace_id
+                    ) AS event_count,
+                    (
+                        SELECT COUNT(*)
+                        FROM artifact_refs AS r
+                        WHERE r.trace_id = t.trace_id
+                    ) AS artifact_count,
+                    (
+                        SELECT COUNT(*)
+                        FROM links AS l
+                        WHERE l.trace_id = t.trace_id
+                    ) AS link_count,
+                    (
+                        SELECT s.operation
+                        FROM spans AS s
+                        WHERE s.trace_id = t.trace_id AND s.status = 'running'
+                        ORDER BY s.started_at DESC, s.span_id DESC
+                        LIMIT 1
+                    ) AS active_span_operation
+                FROM traces AS t {where}
+                ORDER BY COALESCE(t.ended_at, t.started_at) DESC, t.trace_id DESC
                 LIMIT ?
                 """,
                 tuple(values),

@@ -41,6 +41,8 @@ class ExecutionTraceService:
         before_trace_id: str | None,
         status: str | None,
         operation: str | None,
+        source: str | None,
+        kind: str | None,
         plugin_id: str | None,
         degraded: bool | None,
     ) -> list[dict[str, Any]]:
@@ -52,6 +54,8 @@ class ExecutionTraceService:
             before_trace_id=before_trace_id,
             status=status,
             operation=operation,
+            source=source,
+            kind=kind,
             plugin_id=plugin_id,
             degraded=degraded,
         )

@@ -215,6 +215,12 @@ export interface ExecutionTraceSummary {
   degradation_reasons?: string[];
   attributes?: Record<string, unknown>;
   dropped?: Record<string, number>;
+  revision?: number | null;
+  span_count?: number | null;
+  event_count?: number | null;
+  artifact_count?: number | null;
+  link_count?: number | null;
+  active_span_operation?: string | null;
 }
 
 export interface ExecutionTraceSpan {
@@ -232,6 +238,8 @@ export interface ExecutionTraceSpan {
   degraded: boolean;
   degradation_reasons?: string[];
   attributes?: Record<string, unknown>;
+  duration_is_lower_bound?: boolean;
+  revision?: number | null;
 }
 
 export interface ExecutionTraceEvent {
@@ -270,6 +278,7 @@ export interface ExecutionTraceDetail {
   events: ExecutionTraceEvent[];
   artifact_refs: ExecutionTraceArtifactRef[];
   links: ExecutionTraceLink[];
+  revision?: number | null;
 }
 
 export interface ExecutionTraceOverview {
@@ -291,6 +300,8 @@ export interface ExecutionTraceListParams {
   before_trace_id?: string;
   status?: string;
   operation?: string;
+  source?: string;
+  kind?: string;
   plugin_id?: string;
   degraded?: boolean;
 }

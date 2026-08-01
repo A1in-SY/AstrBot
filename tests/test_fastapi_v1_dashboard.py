@@ -13,7 +13,7 @@ from fastapi.responses import PlainTextResponse
 
 import astrbot.dashboard.services.config_service as config_service
 from astrbot.core import file_token_service
-from astrbot.core.trace.service import TraceService
+from astrbot.core.trace.service import PluginTracer, TraceService
 from astrbot.dashboard.api.app import create_dashboard_asgi_app
 from astrbot.dashboard.asgi_runtime import (
     FastAPIAppAdapter,
@@ -1111,6 +1111,53 @@ async def test_v1_execution_trace_uses_core_storage_and_replaces_legacy_settings
 
 
 @pytest.mark.asyncio
+async def test_v1_execution_trace_list_exposes_generic_summary_and_root_filters(
+    asgi_client: httpx.AsyncClient,
+    fake_core_lifecycle,
+    tmp_path: Path,
+):
+    """The dashboard list endpoint forwards generic root filters to storage."""
+
+    trace_service = TraceService(tmp_path / "trace")
+    await trace_service.initialize()
+    fake_core_lifecycle.trace_service = trace_service
+    try:
+        plugin_tracer = PluginTracer(trace_service, "a1in/group-summary")
+        with plugin_tracer.start_root("group_summary.run") as root:
+            root.add_event("summary.started")
+            root.record_text("summary.prompt", "summary")
+            root.make_link("caused_by", target_trace_id="upstream-trace")
+
+        with trace_service.start_root("core.agent", kind="agent"):
+            pass
+        await trace_service.flush()
+
+        response = await asgi_client.get(
+            "/api/v1/traces",
+            headers=_jwt_headers(),
+            params={
+                "source": "plugin",
+                "kind": "business",
+                "plugin_id": "a1in/group-summary",
+                "status": "success",
+                "degraded": "false",
+            },
+        )
+
+        assert response.status_code == 200
+        items = response.json()["data"]["items"]
+        assert len(items) == 1
+        assert items[0]["operation"] == "group_summary.run"
+        assert items[0]["span_count"] == 1
+        assert items[0]["event_count"] == 1
+        assert items[0]["artifact_count"] == 1
+        assert items[0]["link_count"] == 1
+        assert items[0]["active_span_operation"] is None
+    finally:
+        await trace_service.close()
+
+
+@pytest.mark.asyncio
 async def test_v1_openapi_is_served_by_fastapi(asgi_client: httpx.AsyncClient):
     response = await asgi_client.get("/api/v1/openapi.json")
 
@@ -1125,6 +1172,11 @@ async def test_v1_openapi_is_served_by_fastapi(asgi_client: httpx.AsyncClient):
     assert "/api/v1/mcp/servers" in spec["paths"]
     assert "/api/v1/skills" in spec["paths"]
     assert "/api/v1/file" in spec["paths"]
+    trace_parameters = spec["paths"]["/api/v1/traces"]["get"]["parameters"]
+    assert {parameter["name"] for parameter in trace_parameters} >= {
+        "source",
+        "kind",
+    }
 
 
 def test_static_openapi_v1_paths_include_api_version():
@@ -1178,6 +1230,14 @@ async def test_dashboard_static_dist_files_are_served(
         asset_response = await client.get("/assets/index-demo.js")
         favicon_response = await client.get("/favicon.svg")
         page_response = await client.get("/config")
+        trace_overview_response = await client.get(
+            "/traces",
+            follow_redirects=False,
+        )
+        trace_detail_response = await client.get(
+            "/traces/trace-demo-id",
+            follow_redirects=False,
+        )
         missing_response = await client.get("/assets/missing.js")
         traversal_response = await client.get("/assets/%2E%2E/%2E%2E/secret.txt")
         api_response = await client.get("/api/not-found")
@@ -1188,6 +1248,10 @@ async def test_dashboard_static_dist_files_are_served(
     assert favicon_response.text == "<svg></svg>"
     assert page_response.status_code == 200
     assert "/assets/index-demo.js" in page_response.text
+    assert trace_overview_response.status_code == 307
+    assert trace_overview_response.headers["location"] == "/#/traces"
+    assert trace_detail_response.status_code == 307
+    assert trace_detail_response.headers["location"] == "/#/traces/trace-demo-id"
     assert missing_response.status_code == 404
     assert traversal_response.status_code == 404
     assert api_response.status_code == 404

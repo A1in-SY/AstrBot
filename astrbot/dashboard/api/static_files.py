@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 
 from astrbot.dashboard.services.static_file_service import StaticFileService
 
@@ -18,6 +18,19 @@ def _not_found_response() -> PlainTextResponse:
 
 
 async def serve_index(request: Request):
+    """Serve the Dashboard shell, preserving Trace deep links for hash routing.
+
+    The Dashboard uses ``createWebHashHistory``.  A browser that opens a
+    Trace URL directly must therefore be redirected to the equivalent hash
+    route; serving the shell at ``/traces`` alone would boot Vue at ``/``.
+    """
+
+    trace_path = request.url.path
+    if trace_path == "/traces" or trace_path.startswith("/traces/"):
+        location = f"/#{trace_path}"
+        if request.url.query:
+            location = f"{location}?{request.url.query}"
+        return RedirectResponse(location, status_code=307)
     index_file = service.resolve_index_file(_static_folder(request))
     if index_file is None:
         return _not_found_response()

@@ -279,6 +279,43 @@ export type ExecutionTraceConfigRequest = {
     enabled: boolean;
 };
 
+export type ExecutionTraceListData = {
+    items: Array<ExecutionTraceListItem>;
+};
+
+export type ExecutionTraceListEnvelope = {
+    status: "ok";
+    message?: (string) | null;
+    data: ExecutionTraceListData;
+};
+
+export type ExecutionTraceListItem = {
+    trace_id: string;
+    root_span_id: string;
+    operation: string;
+    kind: string;
+    source: string;
+    plugin_id?: (string) | null;
+    started_at: number;
+    ended_at?: (number) | null;
+    status: string;
+    outcome?: (string) | null;
+    degraded: boolean;
+    degradation_reasons?: Array<(string)>;
+    attributes?: {
+        [key: string]: unknown;
+    };
+    revision: number;
+    dropped?: {
+        [key: string]: (number);
+    };
+    span_count: number;
+    event_count: number;
+    artifact_count: number;
+    link_count: number;
+    active_span_operation?: (string) | null;
+};
+
 export type FileUploadRequest = {
     file: (Blob | File);
 };
@@ -3552,14 +3589,16 @@ export type ListExecutionTracesData = {
         before_ended_at?: number;
         before_trace_id?: string;
         degraded?: boolean;
+        kind?: string;
         limit?: number;
         operation?: string;
         plugin_id?: string;
+        source?: string;
         status?: string;
     };
 };
 
-export type ListExecutionTracesResponse = (SuccessEnvelope);
+export type ListExecutionTracesResponse = (ExecutionTraceListEnvelope);
 
 export type ListExecutionTracesError = unknown;
 

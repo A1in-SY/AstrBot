@@ -1,21 +1,31 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { useRouter } from 'vue-router';
 
 import {
   executionTraceApi,
-  type ExecutionTraceArtifact,
-  type ExecutionTraceArtifactRef,
   type ExecutionTraceConfig,
-  type ExecutionTraceDetail,
-  type ExecutionTraceEvent,
-  type ExecutionTraceLink,
   type ExecutionTraceOverview,
   type ExecutionTraceSummary,
 } from '@/api/v1';
-import { useModuleI18n } from '@/i18n/composables';
+import { useI18n, useModuleI18n } from '@/i18n/composables';
 import { useToast } from '@/utils/toast';
+import {
+  executionTraceDuration,
+  executionTraceStatusColor,
+  formatExecutionTraceBytes,
+  formatExecutionTraceDateTime,
+  formatExecutionTraceDuration,
+  isFailedTraceStatus,
+  isRunningTraceStatus,
+} from '@/utils/executionTrace';
 
 const PAGE_SIZE = 50;
+const OVERVIEW_POLL_INTERVAL_MS = 15_000;
+const LIVE_CLOCK_INTERVAL_MS = 1_000;
+
+const router = useRouter();
+const { locale } = useI18n();
 const { tm } = useModuleI18n('features/execution-trace');
 const { error: toastError, success: toastSuccess } = useToast();
 
@@ -31,23 +41,26 @@ const overview = ref<ExecutionTraceOverview>({
 });
 const traces = ref<ExecutionTraceSummary[]>([]);
 const hasMore = ref(false);
-const selectedTraceId = ref<string | null>(null);
-const detail = ref<ExecutionTraceDetail | null>(null);
 const statusFilter = ref<string | null>(null);
+const sourceFilter = ref('');
+const kindFilter = ref('');
+const pluginFilter = ref('');
 const operationFilter = ref('');
+const localSearch = ref('');
 const degradedOnly = ref(false);
 const loading = ref(false);
 const listLoading = ref(false);
-const detailLoading = ref(false);
 const configSaving = ref(false);
 const maintenanceLoading = ref(false);
 const loadError = ref('');
 const clearDialog = ref(false);
 const deleteDialog = ref(false);
-const artifactDialog = ref(false);
-const artifactLoading = ref(false);
-const artifact = ref<ExecutionTraceArtifact | null>(null);
-const selectedArtifact = ref<ExecutionTraceArtifactRef | null>(null);
+const deletingTrace = ref<ExecutionTraceSummary | null>(null);
+const currentSeconds = ref(Date.now() / 1000);
+
+let listRequestId = 0;
+let overviewPollTimer: ReturnType<typeof window.setInterval> | null = null;
+let clockTimer: ReturnType<typeof window.setInterval> | null = null;
 
 const statusOptions = computed(() => [
   { title: tm('filters.allStatuses'), value: null },
@@ -55,28 +68,60 @@ const statusOptions = computed(() => [
     (status) => ({ title: status, value: status }),
   ),
 ]);
-
-const canLoadMore = computed(() => hasMore.value && traces.value.length > 0);
-const spanRows = computed(() => {
-  const spans = detail.value?.spans || [];
-  const byId = new Map(spans.map((span) => [span.span_id, span]));
-  return spans.map((span) => {
-    let depth = 0;
-    let parentId = span.parent_span_id;
-    const visited = new Set<string>();
-    while (parentId && byId.has(parentId) && !visited.has(parentId) && depth < 24) {
-      visited.add(parentId);
-      depth += 1;
-      parentId = byId.get(parentId)?.parent_span_id;
-    }
-    return { span, depth };
+const filterSignature = computed(() => JSON.stringify([
+  statusFilter.value,
+  sourceFilter.value.trim(),
+  kindFilter.value.trim(),
+  pluginFilter.value.trim(),
+  operationFilter.value.trim(),
+  degradedOnly.value,
+]));
+const hasFilters = computed(() =>
+  Boolean(
+    statusFilter.value
+    || sourceFilter.value.trim()
+    || kindFilter.value.trim()
+    || pluginFilter.value.trim()
+    || operationFilter.value.trim()
+    || localSearch.value.trim()
+    || degradedOnly.value,
+  ),
+);
+const visibleTraces = computed(() => {
+  const query = localSearch.value.trim().toLocaleLowerCase(locale.value);
+  if (!query) {
+    return traces.value;
+  }
+  return traces.value.filter((trace) => {
+    const attributes = trace.attributes || {};
+    const haystack = [
+      trace.trace_id,
+      trace.operation,
+      trace.source,
+      trace.kind,
+      trace.plugin_id,
+      trace.active_span_operation,
+      attributes.group_name,
+      attributes.group_umo,
+      attributes.summary_mode,
+      attributes.trigger_reason,
+    ]
+      .filter((value) => value !== null && value !== undefined)
+      .join('\n')
+      .toLocaleLowerCase(locale.value);
+    return haystack.includes(query);
   });
 });
-const eventsBySpan = computed(() => groupBySpan<ExecutionTraceEvent>(detail.value?.events || []));
-const artifactsBySpan = computed(() =>
-  groupBySpan<ExecutionTraceArtifactRef>(detail.value?.artifact_refs || []),
-);
-const linksBySpan = computed(() => groupBySpan<ExecutionTraceLink>(detail.value?.links || []));
+const traceStats = computed(() => ({
+  loaded: visibleTraces.value.length,
+  running: visibleTraces.value.filter((trace) => isRunningTraceStatus(trace.status)).length,
+  success: visibleTraces.value.filter((trace) => trace.status === 'success').length,
+  failed: visibleTraces.value.filter(
+    (trace) => isFailedTraceStatus(trace.status) || ['cancelled', 'incomplete'].includes(trace.status),
+  ).length,
+  degraded: visibleTraces.value.filter((trace) => trace.degraded).length,
+}));
+const hasRunningTrace = computed(() => traces.value.some((trace) => isRunningTraceStatus(trace.status)));
 
 function unwrap<T>(response: { data?: { status?: string; data?: T; message?: string | null } }): T {
   if (response.data?.status !== 'ok' || response.data.data === undefined) {
@@ -85,118 +130,94 @@ function unwrap<T>(response: { data?: { status?: string; data?: T; message?: str
   return response.data.data;
 }
 
-function groupBySpan<T extends { span_id: string }>(items: T[]): Map<string, T[]> {
-  const grouped = new Map<string, T[]>();
-  for (const item of items) {
-    const group = grouped.get(item.span_id) || [];
-    group.push(item);
-    grouped.set(item.span_id, group);
-  }
-  return grouped;
+function formatDateTime(value: unknown): string {
+  return formatExecutionTraceDateTime(value, locale.value);
 }
 
-function statusColor(status: string): string {
-  return {
-    running: 'primary',
-    success: 'success',
-    skipped: 'secondary',
-    error: 'error',
-    cancelled: 'warning',
-    incomplete: 'warning',
-  }[status] || 'secondary';
+function summaryCount(value: number | null | undefined): string {
+  return value === null || value === undefined ? '–' : String(value);
 }
 
-function formatTime(value?: number | null): string {
-  if (!value) {
-    return '–';
-  }
-  return new Date(value * 1000).toLocaleString();
+function traceContext(trace: ExecutionTraceSummary): Array<{ key: string; label: string; value: string }> {
+  const attributes = trace.attributes || {};
+  const keys = [
+    ['group_name', 'context.groupName'],
+    ['group_umo', 'context.groupUmo'],
+    ['summary_mode', 'context.summaryMode'],
+    ['trigger_reason', 'context.triggerReason'],
+  ] as const;
+  return keys.flatMap(([key, labelKey]) => {
+    const value = attributes[key];
+    if (value === null || value === undefined || String(value).trim() === '') {
+      return [];
+    }
+    return [{ key, label: tm(labelKey), value: String(value) }];
+  });
 }
 
-function formatDuration(startedAt: number, endedAt?: number | null): string {
-  if (!endedAt) {
-    return '–';
-  }
-  const milliseconds = Math.max(0, Math.round((endedAt - startedAt) * 1000));
-  if (milliseconds < 1000) {
-    return `${milliseconds} ms`;
-  }
-  if (milliseconds < 60_000) {
-    return `${(milliseconds / 1000).toFixed(2)} s`;
-  }
-  return `${Math.floor(milliseconds / 60_000)}m ${Math.round((milliseconds % 60_000) / 1000)}s`;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-  const units = ['KB', 'MB', 'GB', 'TB'];
-  let value = bytes / 1024;
-  let index = 0;
-  while (value >= 1024 && index < units.length - 1) {
-    value /= 1024;
-    index += 1;
-  }
-  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[index]}`;
-}
-
-function formatJson(value: unknown): string {
-  return JSON.stringify(value || {}, null, 2);
-}
-
-async function loadConfig() {
+async function loadConfig(): Promise<void> {
   config.value = unwrap(await executionTraceApi.config());
 }
 
-async function loadOverview() {
+async function loadOverview(): Promise<void> {
   overview.value = unwrap(await executionTraceApi.overview());
 }
 
-async function loadTraces(reset = true) {
-  if (listLoading.value) {
-    return;
-  }
+async function loadTraces(reset = true): Promise<void> {
+  const requestId = ++listRequestId;
+  const signature = filterSignature.value;
   listLoading.value = true;
   try {
-    if (reset) {
-      hasMore.value = false;
-    }
     const last = reset ? null : traces.value[traces.value.length - 1] || null;
     const response = await executionTraceApi.list({
       limit: PAGE_SIZE,
       status: statusFilter.value || undefined,
+      source: sourceFilter.value.trim() || undefined,
+      kind: kindFilter.value.trim() || undefined,
+      plugin_id: pluginFilter.value.trim() || undefined,
       operation: operationFilter.value.trim() || undefined,
       degraded: degradedOnly.value || undefined,
       before_ended_at: last?.ended_at || last?.started_at,
       before_trace_id: last?.trace_id,
     });
     const items = unwrap<{ items: ExecutionTraceSummary[] }>(response).items;
+    if (requestId !== listRequestId || signature !== filterSignature.value) {
+      return;
+    }
     traces.value = reset ? items : [...traces.value, ...items];
     hasMore.value = items.length === PAGE_SIZE;
-    if (selectedTraceId.value && !traces.value.some((item) => item.trace_id === selectedTraceId.value)) {
-      selectedTraceId.value = null;
-      detail.value = null;
+    loadError.value = '';
+  } catch (error) {
+    if (requestId === listRequestId && signature === filterSignature.value) {
+      loadError.value = error instanceof Error ? error.message : tm('messages.loadFailed');
     }
   } finally {
-    listLoading.value = false;
+    if (requestId === listRequestId) {
+      listLoading.value = false;
+      syncLiveTimers();
+    }
   }
 }
 
-async function refresh() {
+async function refresh(options: { polling?: boolean } = {}): Promise<void> {
+  if (options.polling && (loading.value || listLoading.value)) {
+    return;
+  }
   loading.value = true;
   loadError.value = '';
   try {
     await Promise.all([loadConfig(), loadOverview(), loadTraces(true)]);
   } catch (error) {
-    loadError.value = error instanceof Error ? error.message : tm('messages.loadFailed');
-    toastError(tm('messages.loadFailed'));
+    if (!options.polling) {
+      loadError.value = error instanceof Error ? error.message : tm('messages.loadFailed');
+      toastError(tm('messages.loadFailed'));
+    }
   } finally {
     loading.value = false;
   }
 }
 
-async function updateEnabled(enabled: boolean | null) {
+async function updateEnabled(enabled: boolean | null): Promise<void> {
   if (enabled === null) {
     return;
   }
@@ -212,22 +233,52 @@ async function updateEnabled(enabled: boolean | null) {
   }
 }
 
-async function selectTrace(trace: ExecutionTraceSummary) {
-  selectedTraceId.value = trace.trace_id;
-  detailLoading.value = true;
-  artifact.value = null;
-  selectedArtifact.value = null;
+function reloadForFilters(): void {
+  void loadTraces(true);
+}
+
+function resetFilters(): void {
+  statusFilter.value = null;
+  sourceFilter.value = '';
+  kindFilter.value = '';
+  pluginFilter.value = '';
+  operationFilter.value = '';
+  localSearch.value = '';
+  degradedOnly.value = false;
+  void loadTraces(true);
+}
+
+function openTrace(trace: ExecutionTraceSummary): void {
+  void router.push({ name: 'ExecutionTraceDetail', params: { traceId: trace.trace_id } });
+}
+
+function askDelete(trace: ExecutionTraceSummary): void {
+  if (isRunningTraceStatus(trace.status)) {
+    return;
+  }
+  deletingTrace.value = trace;
+  deleteDialog.value = true;
+}
+
+async function deleteTrace(): Promise<void> {
+  if (!deletingTrace.value) {
+    return;
+  }
+  maintenanceLoading.value = true;
   try {
-    detail.value = unwrap(await executionTraceApi.detail(trace.trace_id));
+    unwrap(await executionTraceApi.remove(deletingTrace.value.trace_id));
+    deleteDialog.value = false;
+    deletingTrace.value = null;
+    toastSuccess(tm('messages.deleteDone'));
+    await refresh();
   } catch {
-    detail.value = null;
-    toastError(tm('messages.loadFailed'));
+    toastError(tm('messages.deleteFailed'));
   } finally {
-    detailLoading.value = false;
+    maintenanceLoading.value = false;
   }
 }
 
-async function runCleanup() {
+async function runCleanup(): Promise<void> {
   maintenanceLoading.value = true;
   try {
     const result = unwrap(await executionTraceApi.cleanup());
@@ -240,13 +291,11 @@ async function runCleanup() {
   }
 }
 
-async function clearCompleted() {
+async function clearCompleted(): Promise<void> {
   maintenanceLoading.value = true;
   try {
     const result = unwrap(await executionTraceApi.clear());
     clearDialog.value = false;
-    selectedTraceId.value = null;
-    detail.value = null;
     toastSuccess(tm('messages.clearDone', { count: result.deleted }));
     await refresh();
   } catch {
@@ -256,40 +305,50 @@ async function clearCompleted() {
   }
 }
 
-async function deleteSelectedTrace() {
-  if (!selectedTraceId.value) {
+function stopLiveTimers(): void {
+  if (overviewPollTimer !== null) {
+    window.clearInterval(overviewPollTimer);
+    overviewPollTimer = null;
+  }
+  if (clockTimer !== null) {
+    window.clearInterval(clockTimer);
+    clockTimer = null;
+  }
+}
+
+function syncLiveTimers(): void {
+  stopLiveTimers();
+  if (document.hidden) {
     return;
   }
-  maintenanceLoading.value = true;
-  try {
-    unwrap(await executionTraceApi.remove(selectedTraceId.value));
-    deleteDialog.value = false;
-    selectedTraceId.value = null;
-    detail.value = null;
-    toastSuccess(tm('messages.deleteDone'));
-    await refresh();
-  } catch {
-    toastError(tm('messages.deleteFailed'));
-  } finally {
-    maintenanceLoading.value = false;
+  overviewPollTimer = window.setInterval(() => {
+    void refresh({ polling: true });
+  }, OVERVIEW_POLL_INTERVAL_MS);
+  if (hasRunningTrace.value) {
+    clockTimer = window.setInterval(() => {
+      currentSeconds.value = Date.now() / 1000;
+    }, LIVE_CLOCK_INTERVAL_MS);
   }
 }
 
-async function openArtifact(ref: ExecutionTraceArtifactRef) {
-  artifactLoading.value = true;
-  selectedArtifact.value = ref;
-  artifact.value = null;
-  artifactDialog.value = true;
-  try {
-    artifact.value = unwrap(await executionTraceApi.artifact(ref.content_hash));
-  } catch {
-    toastError(tm('messages.artifactFailed'));
-  } finally {
-    artifactLoading.value = false;
+function handleVisibilityChange(): void {
+  if (!document.hidden) {
+    currentSeconds.value = Date.now() / 1000;
+    void refresh({ polling: true });
   }
+  syncLiveTimers();
 }
 
-onMounted(refresh);
+onMounted(() => {
+  document.addEventListener('visibilitychange', handleVisibilityChange);
+  void refresh();
+  syncLiveTimers();
+});
+
+onBeforeUnmount(() => {
+  stopLiveTimers();
+  document.removeEventListener('visibilitychange', handleVisibilityChange);
+});
 </script>
 
 <template>
@@ -299,6 +358,16 @@ onMounted(refresh);
         <div class="dashboard-header-main">
           <h1 class="dashboard-title">{{ tm('title') }}</h1>
           <p class="dashboard-subtitle">{{ tm('subtitle') }}</p>
+          <div class="dashboard-header-meta trace-header-meta">
+            <span class="dashboard-pill">
+              <v-icon size="16">mdi-chart-timeline-variant</v-icon>
+              {{ tm('overview.traces24h') }} {{ overview.traces_24h }}
+            </span>
+            <span class="dashboard-pill">
+              <v-icon size="16">mdi-database-outline</v-icon>
+              {{ tm('overview.storage') }} {{ formatExecutionTraceBytes(overview.physical_size) }}
+            </span>
+          </div>
         </div>
         <div class="dashboard-header-actions">
           <v-chip
@@ -328,7 +397,7 @@ onMounted(refresh);
             prepend-icon="mdi-refresh"
             variant="text"
             :loading="loading"
-            @click="refresh"
+            @click="refresh()"
           >
             {{ tm('actions.refresh') }}
           </v-btn>
@@ -357,34 +426,59 @@ onMounted(refresh);
         {{ loadError }}
       </v-alert>
 
-      <div class="dashboard-overview-grid">
-        <div class="dashboard-card dashboard-overview-card">
-          <div class="dashboard-card-icon"><v-icon>mdi-chart-timeline-variant</v-icon></div>
-          <div class="dashboard-card-label">{{ tm('overview.traces24h') }}</div>
-          <div class="dashboard-card-value">{{ overview.traces_24h }}</div>
+      <section class="trace-status-grid">
+        <div class="dashboard-card trace-status-card">
+          <div class="trace-status-icon"><v-icon>mdi-format-list-bulleted</v-icon></div>
+          <div class="trace-status-label">{{ tm('stats.loaded') }}</div>
+          <div class="trace-status-value">{{ traceStats.loaded }}</div>
+          <div class="trace-status-note">{{ tm('stats.loadedNote') }}</div>
         </div>
-        <div class="dashboard-card dashboard-overview-card">
-          <div class="dashboard-card-icon"><v-icon>mdi-progress-clock</v-icon></div>
-          <div class="dashboard-card-label">{{ tm('overview.running') }}</div>
-          <div class="dashboard-card-value">{{ overview.running }}</div>
+        <div class="dashboard-card trace-status-card is-running">
+          <div class="trace-status-icon"><v-icon>mdi-progress-clock</v-icon></div>
+          <div class="trace-status-label">{{ tm('stats.running') }}</div>
+          <div class="trace-status-value">{{ traceStats.running }}</div>
+          <div class="trace-status-note">{{ tm('stats.runningNote') }}</div>
         </div>
-        <div class="dashboard-card dashboard-overview-card">
-          <div class="dashboard-card-icon"><v-icon>mdi-alert-circle-outline</v-icon></div>
-          <div class="dashboard-card-label">{{ tm('overview.errors24h') }}</div>
-          <div class="dashboard-card-value">{{ overview.errors_24h }}</div>
+        <div class="dashboard-card trace-status-card is-success">
+          <div class="trace-status-icon"><v-icon>mdi-check-circle-outline</v-icon></div>
+          <div class="trace-status-label">{{ tm('stats.success') }}</div>
+          <div class="trace-status-value">{{ traceStats.success }}</div>
+          <div class="trace-status-note">{{ tm('stats.successNote') }}</div>
         </div>
-        <div class="dashboard-card dashboard-overview-card">
-          <div class="dashboard-card-icon"><v-icon>mdi-database-outline</v-icon></div>
-          <div class="dashboard-card-label">{{ tm('overview.storage') }}</div>
-          <div class="dashboard-card-value">{{ formatBytes(overview.physical_size) }}</div>
+        <div class="dashboard-card trace-status-card is-failed">
+          <div class="trace-status-icon"><v-icon>mdi-alert-circle-outline</v-icon></div>
+          <div class="trace-status-label">{{ tm('stats.failed') }}</div>
+          <div class="trace-status-value">{{ traceStats.failed }}</div>
+          <div class="trace-status-note">{{ tm('stats.failedNote') }}</div>
         </div>
-      </div>
+        <div class="dashboard-card trace-status-card is-degraded">
+          <div class="trace-status-icon"><v-icon>mdi-alert-outline</v-icon></div>
+          <div class="trace-status-label">{{ tm('stats.degraded') }}</div>
+          <div class="trace-status-value">{{ traceStats.degraded }}</div>
+          <div class="trace-status-note">{{ tm('stats.degradedNote') }}</div>
+        </div>
+      </section>
 
       <section class="dashboard-card dashboard-card--padded mb-5">
         <div class="dashboard-section-head">
-          <div class="dashboard-section-title">{{ tm('filters.title') }}</div>
+          <div>
+            <div class="dashboard-section-title">{{ tm('filters.title') }}</div>
+            <div class="dashboard-section-subtitle">{{ tm('filters.subtitle') }}</div>
+          </div>
+          <v-btn v-if="hasFilters" size="small" variant="text" @click="resetFilters">
+            {{ tm('actions.resetFilters') }}
+          </v-btn>
         </div>
         <div class="trace-filters">
+          <v-text-field
+            v-model="localSearch"
+            :label="tm('filters.search')"
+            clearable
+            density="compact"
+            hide-details
+            prepend-inner-icon="mdi-magnify"
+            variant="outlined"
+          />
           <v-select
             v-model="statusFilter"
             :items="statusOptions"
@@ -393,7 +487,37 @@ onMounted(refresh);
             density="compact"
             hide-details
             variant="outlined"
-            @update:model-value="loadTraces(true)"
+            @update:model-value="reloadForFilters"
+          />
+          <v-text-field
+            v-model="sourceFilter"
+            :label="tm('filters.source')"
+            clearable
+            density="compact"
+            hide-details
+            variant="outlined"
+            @click:clear="reloadForFilters"
+            @keyup.enter="reloadForFilters"
+          />
+          <v-text-field
+            v-model="kindFilter"
+            :label="tm('filters.kind')"
+            clearable
+            density="compact"
+            hide-details
+            variant="outlined"
+            @click:clear="reloadForFilters"
+            @keyup.enter="reloadForFilters"
+          />
+          <v-text-field
+            v-model="pluginFilter"
+            :label="tm('filters.plugin')"
+            clearable
+            density="compact"
+            hide-details
+            variant="outlined"
+            @click:clear="reloadForFilters"
+            @keyup.enter="reloadForFilters"
           />
           <v-text-field
             v-model="operationFilter"
@@ -401,177 +525,117 @@ onMounted(refresh);
             clearable
             density="compact"
             hide-details
-            prepend-inner-icon="mdi-magnify"
             variant="outlined"
-            @click:clear="loadTraces(true)"
-            @keyup.enter="loadTraces(true)"
+            @click:clear="reloadForFilters"
+            @keyup.enter="reloadForFilters"
           />
           <v-checkbox
             v-model="degradedOnly"
             :label="tm('filters.degraded')"
             density="compact"
             hide-details
-            @update:model-value="loadTraces(true)"
+            @update:model-value="reloadForFilters"
           />
         </div>
       </section>
 
-      <div class="dashboard-split-grid trace-split-grid">
-        <section class="dashboard-card trace-list-card">
-          <div class="trace-section-header">
-            <div>
-              <div class="dashboard-section-title">{{ tm('list.title') }}</div>
-              <div class="dashboard-section-subtitle">{{ tm('list.subtitle') }}</div>
-            </div>
+      <section class="dashboard-card trace-table-card">
+        <div class="trace-table-heading">
+          <div>
+            <div class="dashboard-section-title">{{ tm('list.title') }}</div>
+            <div class="dashboard-section-subtitle">{{ tm('list.subtitle') }}</div>
           </div>
-          <v-progress-linear v-if="listLoading" color="primary" indeterminate />
-          <div v-else-if="!traces.length" class="trace-empty">{{ tm('list.empty') }}</div>
-          <div v-else class="trace-list">
-            <button
-              v-for="trace in traces"
-              :key="trace.trace_id"
-              class="trace-list-row"
-              :class="{ selected: trace.trace_id === selectedTraceId }"
-              type="button"
-              @click="selectTrace(trace)"
-            >
-              <div class="trace-list-row-main">
-                <div class="trace-operation">{{ trace.operation }}</div>
-                <div class="trace-row-meta">
-                  <span>{{ formatTime(trace.started_at) }}</span>
-                  <span>{{ formatDuration(trace.started_at, trace.ended_at) }}</span>
-                  <span v-if="trace.plugin_id">{{ trace.plugin_id }}</span>
-                </div>
+          <span class="trace-result-count">{{ tm('list.resultCount', { count: visibleTraces.length }) }}</span>
+        </div>
+        <v-progress-linear v-if="listLoading" color="primary" indeterminate />
+        <div v-else-if="!visibleTraces.length" class="trace-empty">{{ tm('list.empty') }}</div>
+        <div v-else class="trace-table-wrap">
+          <div class="trace-table-head" aria-hidden="true">
+            <span>{{ tm('table.time') }}</span>
+            <span>{{ tm('table.trace') }}</span>
+            <span>{{ tm('table.source') }}</span>
+            <span>{{ tm('table.operation') }}</span>
+            <span>{{ tm('table.status') }}</span>
+            <span>{{ tm('table.metrics') }}</span>
+            <span>{{ tm('table.actions') }}</span>
+          </div>
+          <article
+            v-for="trace in visibleTraces"
+            :key="trace.trace_id"
+            class="trace-row"
+            role="link"
+            tabindex="0"
+            @click="openTrace(trace)"
+            @keydown.enter.self="openTrace(trace)"
+          >
+            <div class="trace-time">
+              <strong>{{ formatDateTime(trace.started_at) }}</strong>
+              <span>{{ tm('table.ended') }} {{ formatDateTime(trace.ended_at) }}</span>
+            </div>
+            <div class="trace-identity">
+              <code :title="trace.trace_id">{{ trace.trace_id }}</code>
+              <div v-if="traceContext(trace).length" class="trace-context">
+                <span v-for="entry in traceContext(trace)" :key="entry.key" :title="`${entry.label}: ${entry.value}`">
+                  {{ entry.label }}: {{ entry.value }}
+                </span>
               </div>
-              <div class="trace-list-row-status">
-                <v-chip :color="statusColor(trace.status)" size="x-small" variant="tonal">
+            </div>
+            <div class="trace-source">
+              <strong>{{ trace.source || '–' }}</strong>
+              <span>{{ trace.kind || '–' }}</span>
+              <span v-if="trace.plugin_id" class="mono">{{ trace.plugin_id }}</span>
+            </div>
+            <div class="trace-operation">
+              <strong :title="trace.operation">{{ trace.operation }}</strong>
+              <span :title="trace.active_span_operation || undefined">
+                {{ trace.active_span_operation || tm('table.noActiveOperation') }}
+              </span>
+            </div>
+            <div class="trace-state">
+              <div>
+                <v-chip :color="executionTraceStatusColor(trace.status)" size="x-small" variant="tonal">
                   {{ trace.status }}
                 </v-chip>
-                <v-icon v-if="trace.degraded" color="warning" size="18">mdi-alert-outline</v-icon>
+                <v-chip v-if="trace.degraded" color="warning" size="x-small" variant="tonal">
+                  {{ tm('table.degraded') }}
+                </v-chip>
               </div>
-            </button>
-          </div>
-          <div v-if="canLoadMore" class="trace-load-more">
-            <v-btn variant="text" :loading="listLoading" @click="loadTraces(false)">
-              {{ tm('actions.loadMore') }}
-            </v-btn>
-          </div>
-        </section>
-
-        <section class="dashboard-card trace-detail-card">
-          <template v-if="detailLoading">
-            <div class="trace-empty"><v-progress-circular color="primary" indeterminate /></div>
-          </template>
-          <template v-else-if="detail">
-            <div class="trace-section-header trace-detail-header">
-              <div>
-                <div class="dashboard-section-title">{{ tm('detail.title') }}</div>
-                <div class="dashboard-section-subtitle">{{ tm('detail.subtitle') }}</div>
-                <code class="trace-id">{{ detail.trace.trace_id }}</code>
-              </div>
+              <span v-if="trace.outcome">{{ trace.outcome }}</span>
+            </div>
+            <div class="trace-metrics">
+              <strong>{{ formatExecutionTraceDuration(executionTraceDuration(trace, currentSeconds)) }}</strong>
+              <span>
+                {{ tm('table.counts', {
+                  spans: summaryCount(trace.span_count),
+                  events: summaryCount(trace.event_count),
+                  artifacts: summaryCount(trace.artifact_count),
+                  links: summaryCount(trace.link_count),
+                }) }}
+              </span>
+            </div>
+            <div class="trace-row-actions">
+              <v-btn color="primary" size="small" variant="text" @click.stop="openTrace(trace)">
+                {{ tm('actions.view') }}
+              </v-btn>
               <v-btn
                 color="error"
-                icon="mdi-delete-outline"
                 size="small"
                 variant="text"
-                :disabled="detail.trace.status === 'running' || maintenanceLoading"
-                @click="deleteDialog = true"
-              />
-            </div>
-
-            <div class="trace-detail-summary">
-              <v-chip :color="statusColor(detail.trace.status)" size="small" variant="tonal">
-                {{ detail.trace.status }}
-              </v-chip>
-              <span>{{ detail.trace.operation }}</span>
-              <span>{{ formatDuration(detail.trace.started_at, detail.trace.ended_at) }}</span>
-              <span v-if="detail.trace.outcome">{{ tm('detail.outcome') }}: {{ detail.trace.outcome }}</span>
-            </div>
-
-            <div v-if="detail.trace.degradation_reasons?.length" class="trace-degradation">
-              <strong>{{ tm('detail.reasons') }}</strong>
-              <v-chip
-                v-for="reason in detail.trace.degradation_reasons"
-                :key="reason"
-                color="warning"
-                size="x-small"
-                variant="tonal"
+                :disabled="isRunningTraceStatus(trace.status) || maintenanceLoading"
+                @click.stop="askDelete(trace)"
               >
-                {{ reason }}
-              </v-chip>
+                {{ tm('actions.delete') }}
+              </v-btn>
             </div>
-
-            <div class="trace-detail-block">
-              <div class="trace-block-title">{{ tm('detail.spans') }}</div>
-              <div v-for="row in spanRows" :key="row.span.span_id" class="trace-span-row">
-                <div class="trace-span-line" :style="{ paddingLeft: `${row.depth * 18}px` }">
-                  <span class="trace-span-indent" :class="{ root: row.depth === 0 }"></span>
-                  <span class="trace-span-operation">{{ row.span.operation }}</span>
-                  <v-chip :color="statusColor(row.span.status)" size="x-small" variant="tonal">
-                    {{ row.span.status }}
-                  </v-chip>
-                  <span class="trace-span-duration">{{ formatDuration(row.span.started_at, row.span.ended_at) }}</span>
-                  <v-icon v-if="row.span.degraded" color="warning" size="16">mdi-alert-outline</v-icon>
-                </div>
-                <details v-if="Object.keys(row.span.attributes || {}).length" class="trace-json-details">
-                  <summary>{{ tm('detail.attributes') }}</summary>
-                  <pre>{{ formatJson(row.span.attributes) }}</pre>
-                </details>
-                <div v-if="eventsBySpan.get(row.span.span_id)?.length" class="trace-record-group">
-                  <div class="trace-record-label">{{ tm('detail.events') }}</div>
-                  <div v-for="event in eventsBySpan.get(row.span.span_id)" :key="`${event.span_id}-${event.event_index}`" class="trace-record">
-                    <span>{{ event.name }}</span>
-                    <span>{{ formatTime(event.occurred_at) }}</span>
-                  </div>
-                </div>
-                <div v-if="artifactsBySpan.get(row.span.span_id)?.length" class="trace-record-group">
-                  <div class="trace-record-label">{{ tm('detail.artifacts') }}</div>
-                  <div v-for="ref in artifactsBySpan.get(row.span.span_id)" :key="`${ref.span_id}-${ref.ref_index}`" class="trace-artifact-row">
-                    <div>
-                      <strong>{{ ref.role }}</strong>
-                      <span>{{ ref.media_type || 'application/octet-stream' }}</span>
-                      <span>{{ formatBytes(ref.captured_size || ref.logical_size || 0) }}</span>
-                      <v-chip v-if="ref.truncated" color="warning" size="x-small" variant="tonal">truncated</v-chip>
-                    </div>
-                    <v-btn size="x-small" variant="text" @click="openArtifact(ref)">
-                      {{ tm('actions.viewArtifact') }}
-                    </v-btn>
-                  </div>
-                </div>
-                <div v-if="linksBySpan.get(row.span.span_id)?.length" class="trace-record-group">
-                  <div class="trace-record-label">{{ tm('detail.links') }}</div>
-                  <div v-for="link in linksBySpan.get(row.span.span_id)" :key="`${link.span_id}-${link.link_index}`" class="trace-record">
-                    <span>{{ link.relation }}</span>
-                    <code>{{ link.target_trace_id || link.target_span_id || '–' }}</code>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </template>
-          <div v-else class="trace-empty">{{ tm('detail.empty') }}</div>
-        </section>
-      </div>
+          </article>
+        </div>
+        <div v-if="hasMore" class="trace-load-more">
+          <v-btn variant="tonal" :loading="listLoading" @click="loadTraces(false)">
+            {{ tm('actions.loadMore') }}
+          </v-btn>
+        </div>
+      </section>
     </v-container>
-
-    <v-dialog v-model="artifactDialog" max-width="960">
-      <v-card>
-        <v-card-title class="text-h3 pa-4 pb-0 pl-6">{{ tm('artifact.title') }}</v-card-title>
-        <v-card-text>
-          <v-progress-linear v-if="artifactLoading" color="primary" indeterminate />
-          <template v-else-if="artifact">
-            <v-alert v-if="selectedArtifact?.truncated" class="mb-3" density="compact" type="warning" variant="tonal">
-              {{ tm('artifact.truncated') }}
-            </v-alert>
-            <pre class="artifact-content">{{ artifact.content || tm('artifact.empty') }}</pre>
-          </template>
-          <div v-else class="trace-empty">{{ tm('artifact.empty') }}</div>
-        </v-card-text>
-        <v-card-actions>
-          <v-spacer />
-          <v-btn variant="text" @click="artifactDialog = false">{{ tm('actions.close') }}</v-btn>
-        </v-card-actions>
-      </v-card>
-    </v-dialog>
 
     <v-dialog v-model="clearDialog" max-width="520">
       <v-card>
@@ -592,7 +656,7 @@ onMounted(refresh);
         <v-card-actions>
           <v-spacer />
           <v-btn variant="text" :disabled="maintenanceLoading" @click="deleteDialog = false">{{ tm('actions.cancel') }}</v-btn>
-          <v-btn color="error" variant="tonal" :loading="maintenanceLoading" @click="deleteSelectedTrace">{{ tm('actions.confirm') }}</v-btn>
+          <v-btn color="error" variant="tonal" :loading="maintenanceLoading" @click="deleteTrace">{{ tm('actions.confirm') }}</v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>
@@ -606,97 +670,218 @@ onMounted(refresh);
   min-height: 100%;
 }
 
+.trace-header-meta {
+  margin-top: 12px;
+}
+
+.trace-status-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.trace-status-card {
+  min-width: 0;
+  padding: 16px;
+}
+
+.trace-status-icon {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: var(--dashboard-soft);
+  color: rgb(var(--v-theme-primary));
+}
+
+.trace-status-label {
+  margin-top: 10px;
+  color: var(--dashboard-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.trace-status-value {
+  margin-top: 4px;
+  font-size: 27px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.trace-status-note {
+  min-height: 30px;
+  margin-top: 6px;
+  color: var(--dashboard-subtle);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.trace-status-card.is-running .trace-status-icon {
+  background: rgba(var(--v-theme-primary), 0.12);
+  color: rgb(var(--v-theme-primary));
+}
+
+.trace-status-card.is-success .trace-status-icon {
+  background: rgba(var(--v-theme-success), 0.12);
+  color: rgb(var(--v-theme-success));
+}
+
+.trace-status-card.is-failed .trace-status-icon {
+  background: rgba(var(--v-theme-error), 0.12);
+  color: rgb(var(--v-theme-error));
+}
+
+.trace-status-card.is-degraded .trace-status-icon {
+  background: rgba(var(--v-theme-warning), 0.12);
+  color: rgb(var(--v-theme-warning));
+}
+
 .trace-filters {
   display: grid;
-  grid-template-columns: minmax(180px, 0.7fr) minmax(220px, 1.3fr) auto;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
   align-items: center;
+  gap: 12px;
+}
+
+.trace-table-card {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.trace-table-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 22px 16px;
+  border-bottom: 1px solid var(--dashboard-border);
+}
+
+.trace-result-count {
+  color: var(--dashboard-muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.trace-table-wrap {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.trace-table-head,
+.trace-row {
+  display: grid;
+  min-width: 1250px;
+  grid-template-columns: 178px minmax(180px, 1.3fr) 145px minmax(155px, 1fr) 130px 170px 110px;
   gap: 14px;
 }
 
-.trace-split-grid {
-  align-items: start;
-}
-
-.trace-list-card,
-.trace-detail-card {
-  min-height: 500px;
-}
-
-.trace-section-header {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 20px 20px 16px;
+.trace-table-head {
+  padding: 11px 18px;
   border-bottom: 1px solid var(--dashboard-border);
+  background: rgba(var(--v-theme-on-surface), 0.018);
+  color: var(--dashboard-muted);
+  font-size: 11px;
+  font-weight: 700;
 }
 
-.trace-list {
-  max-height: 720px;
-  overflow: auto;
-}
-
-.trace-list-row {
-  display: flex;
-  width: 100%;
-  min-width: 0;
+.trace-row {
+  align-items: center;
   padding: 14px 18px;
   border: 0;
   border-bottom: 1px solid var(--dashboard-border);
-  color: inherit;
   cursor: pointer;
-  text-align: left;
-  background: transparent;
+  outline: 0;
 }
 
-.trace-list-row:hover,
-.trace-list-row.selected {
+.trace-row:hover {
   background: var(--dashboard-soft);
 }
 
-.trace-list-row-main {
+.trace-row:focus-visible {
+  outline: 2px solid rgb(var(--v-theme-primary));
+  outline-offset: -2px;
+}
+
+.trace-row > div {
   min-width: 0;
-  flex: 1;
 }
 
-.trace-list-row-status {
-  display: flex;
-  align-items: center;
-  align-self: flex-start;
-  gap: 8px;
-  padding-left: 12px;
+.trace-time,
+.trace-identity,
+.trace-source,
+.trace-operation,
+.trace-state,
+.trace-metrics {
+  display: grid;
+  gap: 4px;
 }
 
-.trace-operation {
+.trace-time strong,
+.trace-identity code,
+.trace-source strong,
+.trace-operation strong,
+.trace-metrics strong {
+  min-width: 0;
   overflow: hidden;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 13px;
-  font-weight: 650;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.trace-row-meta,
-.trace-detail-summary,
-.trace-degradation,
-.trace-artifact-row > div {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 6px;
+.trace-time span,
+.trace-source span,
+.trace-operation span,
+.trace-state > span,
+.trace-metrics span {
+  min-width: 0;
+  overflow: hidden;
   color: var(--dashboard-muted);
-  font-size: 12px;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.trace-row-meta span + span::before {
-  margin-right: 8px;
-  color: var(--dashboard-subtle);
-  content: '·';
+.trace-identity code {
+  color: var(--dashboard-text);
+  font-size: 11px;
 }
 
-.trace-load-more,
-.trace-empty {
+.trace-context {
   display: flex;
-  min-height: 140px;
+  gap: 4px;
+  overflow: hidden;
+  flex-wrap: wrap;
+}
+
+.trace-context span {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--dashboard-subtle);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-state > div,
+.trace-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.trace-row-actions {
+  justify-content: flex-start;
+}
+
+.trace-empty,
+.trace-load-more {
+  display: flex;
+  min-height: 160px;
   align-items: center;
   justify-content: center;
   padding: 24px;
@@ -704,150 +889,32 @@ onMounted(refresh);
   text-align: center;
 }
 
-.trace-detail-card {
-  padding-bottom: 20px;
-}
-
-.trace-detail-header {
-  align-items: flex-start;
-}
-
-.trace-id {
-  display: inline-block;
-  max-width: 100%;
-  margin-top: 10px;
-  color: var(--dashboard-subtle);
-  font-size: 11px;
-  overflow-wrap: anywhere;
-}
-
-.trace-detail-summary,
-.trace-degradation,
-.trace-detail-block {
-  margin: 16px 20px 0;
-}
-
-.trace-degradation {
-  align-items: center;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: rgba(var(--v-theme-warning), 0.08);
-}
-
-.trace-block-title {
-  margin-bottom: 10px;
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.trace-span-row {
-  padding: 10px 0;
+.trace-load-more {
+  min-height: auto;
   border-top: 1px solid var(--dashboard-border);
 }
 
-.trace-span-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
+@media (max-width: 1320px) {
+  .trace-status-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
-.trace-span-indent {
-  display: inline-block;
-  width: 9px;
-  height: 9px;
-  flex: 0 0 auto;
-  border: 2px solid rgb(var(--v-theme-primary));
-  border-radius: 50%;
+@media (max-width: 920px) {
+  .trace-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
-.trace-span-indent.root {
-  background: rgb(var(--v-theme-primary));
-}
-
-.trace-span-operation {
-  min-width: 0;
-  overflow: hidden;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.trace-span-duration {
-  margin-left: auto;
-  color: var(--dashboard-muted);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.trace-json-details {
-  margin: 8px 0 0 27px;
-  color: var(--dashboard-muted);
-  font-size: 12px;
-}
-
-.trace-json-details summary {
-  cursor: pointer;
-}
-
-.trace-json-details pre,
-.artifact-content {
-  max-height: 340px;
-  margin: 8px 0 0;
-  padding: 12px;
-  overflow: auto;
-  border-radius: 8px;
-  background: rgba(var(--v-theme-on-surface), 0.04);
-  color: var(--dashboard-text);
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.trace-record-group {
-  margin: 8px 0 0 27px;
-}
-
-.trace-record-label {
-  margin-bottom: 4px;
-  color: var(--dashboard-muted);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.trace-record,
-.trace-artifact-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-width: 0;
-  padding: 4px 0;
-  color: var(--dashboard-muted);
-  font-size: 12px;
-}
-
-.trace-record code {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.artifact-content {
-  max-height: 65vh;
-  margin: 0;
-}
-
-@media (max-width: 960px) {
+@media (max-width: 640px) {
+  .trace-status-grid,
   .trace-filters {
     grid-template-columns: 1fr;
   }
 
-  .trace-split-grid {
-    grid-template-columns: 1fr;
+  .trace-table-heading {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 </style>
