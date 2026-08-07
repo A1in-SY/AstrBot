@@ -97,7 +97,7 @@
     "degraded": "已降级",
     "complete": "完整",
     "waterfall": "Span 层级瀑布图",
-    "waterfallSubtitle": "按真实开始偏移与持续时间绘制；条纹表示运行中或耗时下界。点击任意 Span 查看结构化详情。",
+    "waterfallSubtitle": "按真实开始偏移与持续时间绘制；条纹表示运行中或耗时下界，红色描边表示失败。点击任意 Span 查看结构化详情。",
     "waitingForSpans": "Trace 正在运行，等待 Span 数据…",
     "noSpans": "这条 Trace 没有 Span 数据。",
     "runInfo": "运行信息",
@@ -119,7 +119,19 @@
     "hint": "点击任意 Span 查看完整记录",
     "orphanHint": "父 Span 缺失、指向自身或存在环",
     "unknownKind": "未知类型",
-    "error": "错误"
+    "error": "错误",
+    "categories": {
+      "pipeline": "消息流水线",
+      "plugin": "插件业务",
+      "agent": "Agent 执行",
+      "provider": "模型/服务",
+      "speech": "语音处理",
+      "tool": "工具调用",
+      "mcp": "MCP 调用",
+      "skill": "Skill 加载",
+      "delivery": "消息投递",
+      "other": "其他"
+    }
   },
   "spanDialog": {
     "eyebrow": "SPAN 详情",

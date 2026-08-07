@@ -222,33 +222,122 @@ export function executionTraceBarGeometry(
   };
 }
 
-export function executionTraceSpanColor(span: Pick<ExecutionTraceSpan, 'kind' | 'status'>): string {
-  if (isFailedTraceStatus(span.status)) {
-    return 'rgb(var(--v-theme-error))';
+export type ExecutionTraceSpanCategoryKey =
+  | 'pipeline'
+  | 'plugin'
+  | 'agent'
+  | 'provider'
+  | 'speech'
+  | 'tool'
+  | 'mcp'
+  | 'skill'
+  | 'delivery'
+  | 'other';
+
+export interface ExecutionTraceSpanLegendItem {
+  key: ExecutionTraceSpanCategoryKey;
+  labelKey: string;
+  color: string;
+}
+
+const SPEECH_OPERATIONS = new Set(['stt.call', 'tts.call']);
+const PROVIDER_LEGACY_KINDS = new Set(['model', 'model_call', 'llm']);
+
+export const SPAN_LEGEND_ITEMS: readonly ExecutionTraceSpanLegendItem[] = [
+  {
+    key: 'pipeline',
+    labelKey: 'waterfall.categories.pipeline',
+    color: 'rgb(var(--v-theme-primary))',
+  },
+  {
+    key: 'plugin',
+    labelKey: 'waterfall.categories.plugin',
+    color: '#eb2f96',
+  },
+  {
+    key: 'agent',
+    labelKey: 'waterfall.categories.agent',
+    color: '#7c4dff',
+  },
+  {
+    key: 'provider',
+    labelKey: 'waterfall.categories.provider',
+    color: 'rgb(var(--v-theme-info))',
+  },
+  {
+    key: 'speech',
+    labelKey: 'waterfall.categories.speech',
+    color: '#00b3a4',
+  },
+  {
+    key: 'tool',
+    labelKey: 'waterfall.categories.tool',
+    color: 'rgb(var(--v-theme-warning))',
+  },
+  {
+    key: 'mcp',
+    labelKey: 'waterfall.categories.mcp',
+    color: '#8f8f9a',
+  },
+  {
+    key: 'skill',
+    labelKey: 'waterfall.categories.skill',
+    color: '#a0d911',
+  },
+  {
+    key: 'delivery',
+    labelKey: 'waterfall.categories.delivery',
+    color: 'rgb(var(--v-theme-success))',
+  },
+  {
+    key: 'other',
+    labelKey: 'waterfall.categories.other',
+    color: 'rgba(var(--v-theme-on-surface), 0.45)',
+  },
+];
+
+export function executionTraceSpanCategory(
+  span: Pick<ExecutionTraceSpan, 'kind' | 'operation' | 'source'>,
+): ExecutionTraceSpanCategoryKey {
+  const kind = String(span.kind || '').trim().toLowerCase();
+  const operation = String(span.operation || '').trim().toLowerCase();
+  const source = String(span.source || '').trim().toLowerCase();
+  if (kind === 'delivery') {
+    return 'delivery';
   }
-  switch (String(span.kind || '').trim().toLowerCase()) {
-    case 'model':
-    case 'model_call':
-    case 'llm':
-      return 'rgb(var(--v-theme-info))';
-    case 'tool':
-    case 'tool_call':
-      return 'rgb(var(--v-theme-warning))';
-    case 'skill':
-    case 'mcp':
-      return 'rgb(var(--v-theme-secondary))';
-    case 'delivery':
-    case 'tts':
-    case 'stt':
-      return 'rgb(var(--v-theme-success))';
-    case 'agent':
-    case 'pipeline':
-    case 'message':
-    case 'phase':
-      return 'rgb(var(--v-theme-primary))';
-    default:
-      return 'rgba(var(--v-theme-on-surface), 0.5)';
+  if (kind === 'pipeline') {
+    return 'pipeline';
   }
+  if (kind === 'plugin' || (kind === 'business' && source === 'plugin')) {
+    return 'plugin';
+  }
+  if (kind === 'agent') {
+    return 'agent';
+  }
+  if (kind === 'provider' && SPEECH_OPERATIONS.has(operation)) {
+    return 'speech';
+  }
+  if (kind === 'provider' || PROVIDER_LEGACY_KINDS.has(kind)) {
+    return 'provider';
+  }
+  if (operation === 'mcp.tool.call') {
+    return 'mcp';
+  }
+  if (operation === 'skill.load') {
+    return 'skill';
+  }
+  if (kind === 'tool') {
+    return 'tool';
+  }
+  return 'other';
+}
+
+export function executionTraceSpanCategoryColor(
+  span: Pick<ExecutionTraceSpan, 'kind' | 'operation' | 'source'>,
+): string {
+  const category = executionTraceSpanCategory(span);
+  return SPAN_LEGEND_ITEMS.find((item) => item.key === category)?.color
+    ?? 'rgba(var(--v-theme-on-surface), 0.45)';
 }
 
 export function executionTraceSpanLabel(span: Pick<ExecutionTraceSpan, 'operation' | 'kind'>): string {

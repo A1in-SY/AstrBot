@@ -7,7 +7,8 @@ import {
   buildExecutionTraceSpanRows,
   executionTraceBarGeometry,
   executionTraceDuration,
-  executionTraceSpanColor,
+  executionTraceSpanCategory,
+  executionTraceSpanCategoryColor,
   executionTraceSpanLabel,
   executionTraceSpanLowerBound,
   executionTraceStatusColor,
@@ -15,6 +16,7 @@ import {
   formatExecutionTraceDuration,
   isFailedTraceStatus,
   isRunningTraceStatus,
+  SPAN_LEGEND_ITEMS,
 } from '@/utils/executionTrace';
 
 const props = withDefaults(defineProps<{
@@ -42,23 +44,14 @@ const ticks = computed(() =>
   })),
 );
 const legend = computed(() => {
-  const kinds = new Map<string, { key: string; label: string; color: string }>();
-  for (const span of props.spans) {
-    const kind = String(span.kind || '').trim() || tm('waterfall.unknownKind');
-    const key = kind.toLocaleLowerCase();
-    if (!kinds.has(key)) {
-      kinds.set(key, { key, label: kind, color: executionTraceSpanColor(span) });
-    }
-  }
-  const items = [...kinds.values()];
-  if (props.spans.some((span) => isFailedTraceStatus(span.status))) {
-    items.push({
-      key: 'status:error',
-      label: tm('waterfall.error'),
-      color: 'rgb(var(--v-theme-error))',
-    });
-  }
-  return items;
+  const present = new Set(props.spans.map((span) => executionTraceSpanCategory(span)));
+  return SPAN_LEGEND_ITEMS
+    .filter((item) => present.has(item.key))
+    .map((item) => ({
+      key: item.key,
+      label: tm(item.labelKey),
+      color: item.color,
+    }));
 });
 
 function spanDuration(span: ExecutionTraceSpan): number | null {
@@ -72,7 +65,7 @@ function spanBarStyle(span: ExecutionTraceSpan): Record<string, string> {
       ? `min(${geometry.leftPercent}%, calc(100% - 2px))`
       : `${geometry.leftPercent}%`,
     width: geometry.zeroDuration ? '2px' : `${Math.max(0.2, geometry.widthPercent)}%`,
-    backgroundColor: executionTraceSpanColor(span),
+    backgroundColor: executionTraceSpanCategoryColor(span),
   };
 }
 </script>
@@ -110,7 +103,10 @@ function spanBarStyle(span: ExecutionTraceSpan): Record<string, string> {
             @click="emit('select', row.span)"
           >
             <span v-if="row.depth" class="tree-branch">└</span>
-            <span class="kind-dot" :style="{ backgroundColor: executionTraceSpanColor(row.span) }" />
+            <span
+              class="kind-dot"
+              :style="{ backgroundColor: executionTraceSpanCategoryColor(row.span) }"
+            />
             <span
               class="span-name"
               :title="executionTraceSpanLabel(row.span)"
@@ -143,6 +139,7 @@ function spanBarStyle(span: ExecutionTraceSpan): Record<string, string> {
                 :class="{
                   'is-running': isRunningTraceStatus(row.span.status),
                   'is-lower-bound': executionTraceSpanLowerBound(row.span),
+                  'is-failed': isFailedTraceStatus(row.span.status),
                 }"
                 :style="spanBarStyle(row.span)"
               />
@@ -378,6 +375,18 @@ function spanBarStyle(span: ExecutionTraceSpan): Record<string, string> {
     transparent 6px,
     transparent 12px
   );
+}
+
+.span-bar.is-failed {
+  box-shadow: inset 0 0 0 2px rgb(var(--v-theme-error));
+}
+
+.span-bar.is-failed::after {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(var(--v-theme-error), 0.16);
+  content: '';
 }
 
 .span-meta {

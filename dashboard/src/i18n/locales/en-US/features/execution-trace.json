@@ -97,7 +97,7 @@
     "degraded": "Degraded",
     "complete": "Complete",
     "waterfall": "Span waterfall",
-    "waterfallSubtitle": "Bars use actual start offsets and durations. Stripes mean a span is running or its duration is a lower bound. Select a span for structured detail.",
+    "waterfallSubtitle": "Bars use actual start offsets and durations. Stripes mean a span is running or its duration is a lower bound; a red border means it failed. Select a span for structured detail.",
     "waitingForSpans": "Trace is running; waiting for Span data…",
     "noSpans": "This trace has no Span data.",
     "runInfo": "Run information",
@@ -119,7 +119,19 @@
     "hint": "Select any Span to inspect its record",
     "orphanHint": "The parent Span is missing, self-referential, or cyclic",
     "unknownKind": "Unknown kind",
-    "error": "Error"
+    "error": "Error",
+    "categories": {
+      "pipeline": "Message pipeline",
+      "plugin": "Plugin",
+      "agent": "Agent execution",
+      "provider": "Model / service",
+      "speech": "Speech",
+      "tool": "Tool",
+      "mcp": "MCP",
+      "skill": "Skill",
+      "delivery": "Delivery",
+      "other": "Other"
+    }
   },
   "spanDialog": {
     "eyebrow": "SPAN DETAIL",
