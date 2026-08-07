@@ -121,21 +121,41 @@
                     "description": "API-ключ Tavily",
                     "hint": "Можно добавить несколько ключей для ротации."
                 },
+                "websearch_tavily_base_url": {
+                    "description": "Базовый URL API Tavily (необязательно)",
+                    "hint": "Оставьте пустым для официального адреса https://api.tavily.com. К запросам добавляются /search и /extract."
+                },
                 "websearch_bocha_key": {
                     "description": "API-ключ BoCha",
                     "hint": "Можно добавить несколько ключей для ротации."
+                },
+                "websearch_bocha_base_url": {
+                    "description": "Базовый URL API BoCha (необязательно)",
+                    "hint": "Оставьте пустым для официального адреса https://api.bochaai.com. К запросам добавляется /v1/web-search."
                 },
                 "websearch_brave_key": {
                     "description": "API-ключ Brave Search",
                     "hint": "Можно добавить несколько ключей для ротации."
                 },
+                "websearch_brave_base_url": {
+                    "description": "Базовый URL API Brave (необязательно)",
+                    "hint": "Оставьте пустым для официального адреса https://api.search.brave.com. К запросам добавляется /res/v1/web/search."
+                },
                 "websearch_firecrawl_key": {
                     "description": "API-ключ Firecrawl",
                     "hint": "Можно добавить несколько ключей для ротации."
                 },
+                "websearch_firecrawl_base_url": {
+                    "description": "Базовый URL API Firecrawl (необязательно)",
+                    "hint": "Оставьте пустым для официального адреса https://api.firecrawl.dev. К запросам добавляются /v2/search и /v2/scrape."
+                },
                 "websearch_baidu_app_builder_key": {
                     "description": "API-ключ Baidu Qianfan APP Builder",
                     "hint": "Ссылка: [https://console.bce.baidu.com/iam/#/iam/apikey/list](https://console.bce.baidu.com/iam/#/iam/apikey/list)"
+                },
+                "websearch_baidu_base_url": {
+                    "description": "Базовый URL API Baidu AI Search (необязательно)",
+                    "hint": "Оставьте пустым для официального адреса https://qianfan.baidubce.com. К запросам добавляется /v2/ai_search/web_search."
                 },
                 "web_search_link": {
                     "description": "Показывать ссылки на источники"
@@ -143,6 +163,10 @@
                 "websearch_exa_key": {
                     "description": "API-ключ Exa",
                     "hint": "Можно добавить несколько ключей для ротации. Получить ключ: https://dashboard.exa.ai"
+                },
+                "websearch_exa_base_url": {
+                    "description": "Базовый URL API Exa (необязательно)",
+                    "hint": "Оставьте пустым для официального адреса https://api.exa.ai. К запросам добавляются /search и /contents."
                 }
             }
         },

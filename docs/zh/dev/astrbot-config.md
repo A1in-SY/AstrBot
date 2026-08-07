@@ -60,8 +60,17 @@ AstrBot 默认配置如下：
         "web_search": False,
         "websearch_provider": "tavily",
         "websearch_tavily_key": [],
+        "websearch_tavily_base_url": "",
         "websearch_bocha_key": [],
+        "websearch_bocha_base_url": "",
         "websearch_brave_key": [],
+        "websearch_brave_base_url": "",
+        "websearch_baidu_app_builder_key": "",
+        "websearch_baidu_base_url": "",
+        "websearch_firecrawl_key": [],
+        "websearch_firecrawl_base_url": "",
+        "websearch_exa_key": [],
+        "websearch_exa_base_url": "",
         "web_search_link": False,
         "display_reasoning_text": False,
         "identifier": False,
@@ -288,29 +297,62 @@ ID 白名单。填写后，将只处理所填写的 ID 发来的消息事件。�
 
 #### `provider_settings.websearch_provider`
 
-网页搜索提供商类型。默认为 `tavily`。目前支持 `tavily`、`bocha`、`baidu_ai_search`、`brave`、`firecrawl`。
+网页搜索提供商类型。默认为 `tavily`。目前支持 `tavily`、`bocha`、`baidu_ai_search`、`brave`、`firecrawl`、`exa`。
 
 - `tavily`：使用 Tavily 搜索引擎。
 - `bocha`：使用 BoCha 搜索引擎。
 - `baidu_ai_search`：使用百度 AI Search（MCP）。
 - `brave`：使用 Brave Search API。
 - `firecrawl`：使用 Firecrawl Search API。
+- `exa`：使用 Exa Search API。
 
 #### `provider_settings.websearch_tavily_key`
 
 Tavily 搜索引擎的 API Key 列表。使用 `tavily` 作为网页搜索提供商时需要填写。
 
+#### `provider_settings.websearch_tavily_base_url`
+
+Tavily 搜索引擎的 API Base URL（可选）。留空使用官方地址 `https://api.tavily.com`。填写后请求会拼接 `/search`、`/extract`，例如使用 Tavily Hikari 时可填写 `http://127.0.0.1:58087/api/tavily`。
+
 #### `provider_settings.websearch_bocha_key`
 
 BoCha 搜索引擎的 API Key 列表。使用 `bocha` 作为网页搜索提供商时需要填写。
+
+#### `provider_settings.websearch_bocha_base_url`
+
+BoCha 搜索引擎的 API Base URL（可选）。留空使用官方地址 `https://api.bochaai.com`。填写后请求会拼接 `/v1/web-search`。
 
 #### `provider_settings.websearch_brave_key`
 
 Brave 搜索引擎的 API Key 列表。使用 `brave` 作为网页搜索提供商时需要填写。
 
+#### `provider_settings.websearch_brave_base_url`
+
+Brave 搜索引擎的 API Base URL（可选）。留空使用官方地址 `https://api.search.brave.com`。填写后请求会拼接 `/res/v1/web/search`。
+
 #### `provider_settings.websearch_firecrawl_key`
 
 Firecrawl 搜索引擎的 API Key 列表。使用 `firecrawl` 作为网页搜索提供商时需要填写。
+
+#### `provider_settings.websearch_firecrawl_base_url`
+
+Firecrawl 搜索引擎的 API Base URL（可选）。留空使用官方地址 `https://api.firecrawl.dev`。填写后请求会拼接 `/v2/search`、`/v2/scrape`。
+
+#### `provider_settings.websearch_baidu_app_builder_key`
+
+百度千帆智能云 APP Builder 的 API Key。使用 `baidu_ai_search` 作为网页搜索提供商时需要填写。
+
+#### `provider_settings.websearch_baidu_base_url`
+
+百度 AI 搜索的 API Base URL（可选）。留空使用官方地址 `https://qianfan.baidubce.com`。填写后请求会拼接 `/v2/ai_search/web_search`。
+
+#### `provider_settings.websearch_exa_key`
+
+Exa 搜索引擎的 API Key 列表。使用 `exa` 作为网页搜索提供商时需要填写。
+
+#### `provider_settings.websearch_exa_base_url`
+
+Exa 搜索引擎的 API Base URL（可选）。留空使用官方地址 `https://api.exa.ai`。填写后请求会拼接 `/search`、`/contents`。
 
 #### `provider_settings.web_search_link`
 

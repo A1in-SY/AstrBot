@@ -19,6 +19,17 @@ AstrBot 当前支持 6 种网页搜索源接入方式：`Tavily`、`BoCha`、`�
 
 进入 `配置`，下拉找到网页搜索，您可选择 `Tavily`、`BoCha`、`百度 AI 搜索`、`Brave`、`Firecrawl` 或 `Exa`。
 
+### 自定义 API 地址（Base URL）
+
+每个提供商都支持可选的自定义 API Base URL，用于通过代理或网关转发请求，例如使用 Tavily Hikari 管理多个 Tavily API Key。留空时使用官方地址；填写后，请求会在该地址后拼接原有路径（如 `/search`、`/extract`），调用逻辑不变。
+
+以 Tavily Hikari 为例：在 Hikari 控制台创建访问令牌 `th-...`，然后在 AstrBot 的网页搜索配置中：
+
+- `Tavily API Base URL` 填写 Hikari 的 HTTP 地址，例如 `http://127.0.0.1:58087/api/tavily`；
+- `Tavily API Key` 填写 Hikari 签发的访问令牌 `th-<id>-<secret>`，而不是官方 Tavily Key。
+
+上游的多个 Tavily API Key 轮换与配额管理由 Hikari 负责。
+
 ### Tavily
 
 前往 [Tavily](https://app.tavily.com/home) 得到 API Key，然后填写在相应的配置项。

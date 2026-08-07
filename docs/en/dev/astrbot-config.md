@@ -60,8 +60,17 @@ The default AstrBot configuration is as follows:
         "web_search": False,
         "websearch_provider": "tavily",
         "websearch_tavily_key": [],
+        "websearch_tavily_base_url": "",
         "websearch_bocha_key": [],
+        "websearch_bocha_base_url": "",
         "websearch_brave_key": [],
+        "websearch_brave_base_url": "",
+        "websearch_baidu_app_builder_key": "",
+        "websearch_baidu_base_url": "",
+        "websearch_firecrawl_key": [],
+        "websearch_firecrawl_base_url": "",
+        "websearch_exa_key": [],
+        "websearch_exa_base_url": "",
         "web_search_link": False,
         "display_reasoning_text": False,
         "identifier": False,
@@ -288,29 +297,62 @@ Whether to enable AstrBot's built-in web search capability. Default is `false`. 
 
 #### `provider_settings.websearch_provider`
 
-Web search provider type. Default is `tavily`. Currently supports `tavily`, `bocha`, `baidu_ai_search`, `brave`, and `firecrawl`.
+Web search provider type. Default is `tavily`. Currently supports `tavily`, `bocha`, `baidu_ai_search`, `brave`, `firecrawl`, and `exa`.
 
 - `tavily`: Uses the Tavily search engine.
 - `bocha`: Uses the BoCha search engine.
 - `baidu_ai_search`: Uses Baidu AI Search (MCP).
 - `brave`: Uses Brave Search API.
 - `firecrawl`: Uses the Firecrawl Search API.
+- `exa`: Uses the Exa Search API.
 
 #### `provider_settings.websearch_tavily_key`
 
 API Key list for the Tavily search engine. Required when using `tavily` as the web search provider.
 
+#### `provider_settings.websearch_tavily_base_url`
+
+Optional API Base URL for the Tavily search engine. Leave empty to use the official endpoint `https://api.tavily.com`. When set, requests append `/search` and `/extract`, e.g. `http://127.0.0.1:58087/api/tavily` when using Tavily Hikari.
+
 #### `provider_settings.websearch_bocha_key`
 
 API Key list for the BoCha search engine. Required when using `bocha` as the web search provider.
+
+#### `provider_settings.websearch_bocha_base_url`
+
+Optional API Base URL for the BoCha search engine. Leave empty to use the official endpoint `https://api.bochaai.com`. When set, requests append `/v1/web-search`.
 
 #### `provider_settings.websearch_brave_key`
 
 API Key list for the Brave search engine. Required when using `brave` as the web search provider.
 
+#### `provider_settings.websearch_brave_base_url`
+
+Optional API Base URL for the Brave search engine. Leave empty to use the official endpoint `https://api.search.brave.com`. When set, requests append `/res/v1/web/search`.
+
 #### `provider_settings.websearch_firecrawl_key`
 
 API Key list for the Firecrawl search engine. Required when using `firecrawl` as the web search provider.
+
+#### `provider_settings.websearch_firecrawl_base_url`
+
+Optional API Base URL for the Firecrawl search engine. Leave empty to use the official endpoint `https://api.firecrawl.dev`. When set, requests append `/v2/search` and `/v2/scrape`.
+
+#### `provider_settings.websearch_baidu_app_builder_key`
+
+API Key for the Baidu Qianfan APP Builder. Required when using `baidu_ai_search` as the web search provider.
+
+#### `provider_settings.websearch_baidu_base_url`
+
+Optional API Base URL for Baidu AI Search. Leave empty to use the official endpoint `https://qianfan.baidubce.com`. When set, requests append `/v2/ai_search/web_search`.
+
+#### `provider_settings.websearch_exa_key`
+
+API Key list for the Exa search engine. Required when using `exa` as the web search provider.
+
+#### `provider_settings.websearch_exa_base_url`
+
+Optional API Base URL for the Exa search engine. Leave empty to use the official endpoint `https://api.exa.ai`. When set, requests append `/search` and `/contents`.
 
 #### `provider_settings.web_search_link`
 

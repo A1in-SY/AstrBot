@@ -121,21 +121,41 @@
           "description": "Tavily API Key",
           "hint": "Multiple keys can be added for rotation."
         },
+        "websearch_tavily_base_url": {
+          "description": "Tavily API Base URL (Optional)",
+          "hint": "Leave empty to use the official endpoint https://api.tavily.com. Requests append /search and /extract."
+        },
         "websearch_bocha_key": {
           "description": "BoCha API Key",
           "hint": "Multiple keys can be added for rotation."
+        },
+        "websearch_bocha_base_url": {
+          "description": "BoCha API Base URL (Optional)",
+          "hint": "Leave empty to use the official endpoint https://api.bochaai.com. Requests append /v1/web-search."
         },
         "websearch_brave_key": {
           "description": "Brave Search API Key",
           "hint": "Multiple keys can be added for rotation."
         },
+        "websearch_brave_base_url": {
+          "description": "Brave API Base URL (Optional)",
+          "hint": "Leave empty to use the official endpoint https://api.search.brave.com. Requests append /res/v1/web/search."
+        },
         "websearch_firecrawl_key": {
           "description": "Firecrawl API Key",
           "hint": "Multiple keys can be added for rotation."
         },
+        "websearch_firecrawl_base_url": {
+          "description": "Firecrawl API Base URL (Optional)",
+          "hint": "Leave empty to use the official endpoint https://api.firecrawl.dev. Requests append /v2/search and /v2/scrape."
+        },
         "websearch_baidu_app_builder_key": {
           "description": "Baidu Qianfan Smart Cloud APP Builder API Key",
           "hint": "Reference: [https://console.bce.baidu.com/iam/#/iam/apikey/list](https://console.bce.baidu.com/iam/#/iam/apikey/list)"
+        },
+        "websearch_baidu_base_url": {
+          "description": "Baidu AI Search API Base URL (Optional)",
+          "hint": "Leave empty to use the official endpoint https://qianfan.baidubce.com. Requests append /v2/ai_search/web_search."
         },
         "web_search_link": {
           "description": "Display Source Citations"
@@ -143,6 +163,10 @@
         "websearch_exa_key": {
           "description": "Exa API Key",
           "hint": "Multiple keys can be added for rotation. Get a key at https://dashboard.exa.ai"
+        },
+        "websearch_exa_base_url": {
+          "description": "Exa API Base URL (Optional)",
+          "hint": "Leave empty to use the official endpoint https://api.exa.ai. Requests append /search and /contents."
         }
       }
     },

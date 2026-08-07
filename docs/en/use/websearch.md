@@ -20,6 +20,17 @@ AstrBot currently supports 6 web search providers: `Tavily`, `BoCha`, `Baidu AI 
 
 Go to `Configuration`, scroll down to find Web Search, where you can select `Tavily`, `BoCha`, `Baidu AI Search`, `Brave`, `Firecrawl`, or `Exa`.
 
+### Custom API Base URL
+
+Each provider supports an optional custom API Base URL for routing requests through a proxy or gateway, for example using Tavily Hikari to manage multiple Tavily API keys. When left empty, the official endpoint is used. When set, requests append the original paths (such as `/search` and `/extract`) to that base URL; the calling logic is unchanged.
+
+For example, with Tavily Hikari, create an access token `th-...` in the Hikari console, then configure AstrBot's web search:
+
+- Set `Tavily API Base URL` to the Hikari HTTP endpoint, e.g. `http://127.0.0.1:58087/api/tavily`.
+- Set `Tavily API Key` to the Hikari-issued access token `th-<id>-<secret>` instead of an official Tavily key.
+
+Hikari handles upstream rotation and quota management across multiple Tavily API keys.
+
 ### Tavily
 
 Go to [Tavily](https://app.tavily.com/home) to get an API Key, then fill it in the corresponding configuration item.

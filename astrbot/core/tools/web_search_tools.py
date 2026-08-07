@@ -105,11 +105,41 @@ class _KeyRotator:
 # 432 - Tavily quota exceeded.
 _RETRYABLE_HTTP_STATUSES: frozenset[int] = frozenset({401, 403, 429, 432})
 
+_TAVILY_BASE_URL = "https://api.tavily.com"
+_BOCHA_BASE_URL = "https://api.bochaai.com"
+_BRAVE_BASE_URL = "https://api.search.brave.com"
+_FIRECRAWL_BASE_URL = "https://api.firecrawl.dev"
+_BAIDU_BASE_URL = "https://qianfan.baidubce.com"
+_EXA_BASE_URL = "https://api.exa.ai"
+
 _TAVILY_KEY_ROTATOR = _KeyRotator("websearch_tavily_key", "Tavily")
 _BOCHA_KEY_ROTATOR = _KeyRotator("websearch_bocha_key", "BoCha")
 _BRAVE_KEY_ROTATOR = _KeyRotator("websearch_brave_key", "Brave")
 _FIRECRAWL_KEY_ROTATOR = _KeyRotator("websearch_firecrawl_key", "Firecrawl")
 _EXA_KEY_ROTATOR = _KeyRotator("websearch_exa_key", "Exa")
+
+
+def _provider_endpoint(
+    provider_settings: dict,
+    base_url_setting: str,
+    default_base_url: str,
+    path: str,
+) -> str:
+    """Resolve the request endpoint for a web search provider.
+
+    Args:
+        provider_settings: Provider settings containing the optional base URL.
+        base_url_setting: Name of the base URL config key.
+        default_base_url: Official API base URL used when the config is empty.
+        path: Provider-specific endpoint path appended to the base URL.
+
+    Returns:
+        The full request URL.
+    """
+    base_url = str(provider_settings.get(base_url_setting) or "").strip().rstrip("/")
+    if not base_url:
+        base_url = default_base_url.rstrip("/")
+    return f"{base_url}{path}"
 
 
 def normalize_legacy_web_search_config(cfg) -> None:
@@ -207,7 +237,12 @@ async def _tavily_search(
         }
         async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.post(
-                "https://api.tavily.com/search",
+                _provider_endpoint(
+                    provider_settings,
+                    "websearch_tavily_base_url",
+                    _TAVILY_BASE_URL,
+                    "/search",
+                ),
                 json=payload,
                 headers=header,
             ) as response:
@@ -267,7 +302,12 @@ async def _tavily_extract(provider_settings: dict, payload: dict) -> list[dict]:
         }
         async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.post(
-                "https://api.tavily.com/extract",
+                _provider_endpoint(
+                    provider_settings,
+                    "websearch_tavily_base_url",
+                    _TAVILY_BASE_URL,
+                    "/extract",
+                ),
                 json=payload,
                 headers=header,
             ) as response:
@@ -329,7 +369,12 @@ async def _bocha_search(
         }
         async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.post(
-                "https://api.bochaai.com/v1/web-search",
+                _provider_endpoint(
+                    provider_settings,
+                    "websearch_bocha_base_url",
+                    _BOCHA_BASE_URL,
+                    "/v1/web-search",
+                ),
                 json=payload,
                 headers=header,
             ) as response:
@@ -391,7 +436,12 @@ async def _brave_search(
         }
         async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.get(
-                "https://api.search.brave.com/res/v1/web/search",
+                _provider_endpoint(
+                    provider_settings,
+                    "websearch_brave_base_url",
+                    _BRAVE_BASE_URL,
+                    "/res/v1/web/search",
+                ),
                 params=payload,
                 headers=header,
             ) as response:
@@ -452,7 +502,12 @@ async def _firecrawl_search(
         }
         async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.post(
-                "https://api.firecrawl.dev/v2/search",
+                _provider_endpoint(
+                    provider_settings,
+                    "websearch_firecrawl_base_url",
+                    _FIRECRAWL_BASE_URL,
+                    "/v2/search",
+                ),
                 json=payload,
                 headers=header,
             ) as response:
@@ -519,7 +574,12 @@ async def _firecrawl_scrape(provider_settings: dict, payload: dict) -> dict:
         }
         async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.post(
-                "https://api.firecrawl.dev/v2/scrape",
+                _provider_endpoint(
+                    provider_settings,
+                    "websearch_firecrawl_base_url",
+                    _FIRECRAWL_BASE_URL,
+                    "/v2/scrape",
+                ),
                 json=payload,
                 headers=header,
             ) as response:
@@ -561,7 +621,12 @@ async def _baidu_search(
     }
     async with aiohttp.ClientSession(trust_env=True) as session:
         async with session.post(
-            "https://qianfan.baidubce.com/v2/ai_search/web_search",
+            _provider_endpoint(
+                provider_settings,
+                "websearch_baidu_base_url",
+                _BAIDU_BASE_URL,
+                "/v2/ai_search/web_search",
+            ),
             json=payload,
             headers=headers,
         ) as response:
@@ -1033,7 +1098,12 @@ async def _exa_search(
     }
     async with aiohttp.ClientSession(trust_env=True) as session:
         async with session.post(
-            "https://api.exa.ai/search",
+            _provider_endpoint(
+                provider_settings,
+                "websearch_exa_base_url",
+                _EXA_BASE_URL,
+                "/search",
+            ),
             json=payload,
             headers=headers,
         ) as response:
@@ -1070,7 +1140,12 @@ async def _exa_get_contents(
     }
     async with aiohttp.ClientSession(trust_env=True) as session:
         async with session.post(
-            "https://api.exa.ai/contents",
+            _provider_endpoint(
+                provider_settings,
+                "websearch_exa_base_url",
+                _EXA_BASE_URL,
+                "/contents",
+            ),
             json=payload,
             headers=headers,
         ) as response:

@@ -418,6 +418,33 @@ class _TavilyResponse:
         return self.textData
 
 
+class _RecordingSession:
+    """Record the requested URL for either a GET or POST request."""
+
+    def __init__(self, response):
+        self.response = response
+        self.trust_env = None
+        self.entered = False
+        self.exited = False
+        self.url = None
+
+    async def __aenter__(self):
+        self.entered = True
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.exited = True
+        return None
+
+    def post(self, url, json, headers):
+        self.url = url
+        return self.response
+
+    def get(self, url, params, headers):
+        self.url = url
+        return self.response
+
+
 @pytest.fixture(autouse=True)
 def _resetKeyRotators():
     """Reset KeyRotator indexes to avoid state leakage between tests."""
@@ -462,7 +489,11 @@ async def test_tavily_search_key_failover_on_quota_exceeded_432(
                 status=200,
                 jsonData={
                     "results": [
-                        {"title": "AstrBot", "url": "https://example.com", "content": "OK"}
+                        {
+                            "title": "AstrBot",
+                            "url": "https://example.com",
+                            "content": "OK",
+                        }
                     ]
                 },
             ),
@@ -500,7 +531,11 @@ async def test_tavily_search_key_failover_on_rate_limited_429(
                 status=200,
                 jsonData={
                     "results": [
-                        {"title": "RateLimitOK", "url": "https://example2.com", "content": "OK"}
+                        {
+                            "title": "RateLimitOK",
+                            "url": "https://example2.com",
+                            "content": "OK",
+                        }
                     ]
                 },
             ),
@@ -805,3 +840,152 @@ async def test_exa_get_contents_raises_on_http_error(monkeypatch):
             {"websearch_exa_key": ["exa-key"]},
             {"ids": ["https://example.com"]},
         )
+
+
+# --- Base URL tests ---
+
+
+@pytest.mark.parametrize(
+    ("base_url_value", "expected_url"),
+    [
+        (None, "https://api.example.com/search"),
+        ("", "https://api.example.com/search"),
+        ("   ", "https://api.example.com/search"),
+        ("https://proxy.example", "https://proxy.example/search"),
+        ("https://proxy.example/", "https://proxy.example/search"),
+        (
+            " https://proxy.example/api/tavily/ ",
+            "https://proxy.example/api/tavily/search",
+        ),
+    ],
+)
+def test_provider_endpoint_resolves_base_url(base_url_value, expected_url):
+    provider_settings = {}
+    if base_url_value is not None:
+        provider_settings["websearch_tavily_base_url"] = base_url_value
+
+    assert (
+        tools._provider_endpoint(
+            provider_settings,
+            "websearch_tavily_base_url",
+            "https://api.example.com",
+            "/search",
+        )
+        == expected_url
+    )
+
+
+@pytest.mark.parametrize(
+    ("func_name", "payload", "provider_settings", "expected_url"),
+    [
+        (
+            "_tavily_search",
+            {"query": "AstrBot"},
+            {
+                "websearch_tavily_key": ["tavily-key"],
+                "websearch_tavily_base_url": "https://hikari.example/api/tavily",
+            },
+            "https://hikari.example/api/tavily/search",
+        ),
+        (
+            "_tavily_extract",
+            {"urls": ["https://example.com"]},
+            {
+                "websearch_tavily_key": ["tavily-key"],
+                "websearch_tavily_base_url": "https://hikari.example/api/tavily",
+            },
+            "https://hikari.example/api/tavily/extract",
+        ),
+        (
+            "_bocha_search",
+            {"query": "AstrBot"},
+            {
+                "websearch_bocha_key": ["bocha-key"],
+                "websearch_bocha_base_url": "https://bocha.example",
+            },
+            "https://bocha.example/v1/web-search",
+        ),
+        (
+            "_brave_search",
+            {"q": "AstrBot"},
+            {
+                "websearch_brave_key": ["brave-key"],
+                "websearch_brave_base_url": "https://brave.example",
+            },
+            "https://brave.example/res/v1/web/search",
+        ),
+        (
+            "_firecrawl_search",
+            {"query": "AstrBot"},
+            {
+                "websearch_firecrawl_key": ["firecrawl-key"],
+                "websearch_firecrawl_base_url": "https://firecrawl.example",
+            },
+            "https://firecrawl.example/v2/search",
+        ),
+        (
+            "_firecrawl_scrape",
+            {"url": "https://example.com", "formats": ["markdown"]},
+            {
+                "websearch_firecrawl_key": ["firecrawl-key"],
+                "websearch_firecrawl_base_url": "https://firecrawl.example",
+            },
+            "https://firecrawl.example/v2/scrape",
+        ),
+        (
+            "_baidu_search",
+            {"messages": [{"role": "user", "content": "AstrBot"}]},
+            {
+                "websearch_baidu_app_builder_key": "baidu-key",
+                "websearch_baidu_base_url": "https://baidu.example",
+            },
+            "https://baidu.example/v2/ai_search/web_search",
+        ),
+        (
+            "_exa_search",
+            {"query": "AstrBot"},
+            {
+                "websearch_exa_key": ["exa-key"],
+                "websearch_exa_base_url": "https://exa.example",
+            },
+            "https://exa.example/search",
+        ),
+        (
+            "_exa_get_contents",
+            {"ids": ["https://example.com"]},
+            {
+                "websearch_exa_key": ["exa-key"],
+                "websearch_exa_base_url": "https://exa.example",
+            },
+            "https://exa.example/contents",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_web_search_providers_use_custom_base_url(
+    monkeypatch,
+    func_name,
+    payload,
+    provider_settings,
+    expected_url,
+):
+    json_data = {}
+    if func_name == "_tavily_extract":
+        json_data = {"results": [{"url": "https://example.com", "raw_content": "x"}]}
+    elif func_name == "_bocha_search":
+        json_data = {"data": {"webPages": {"value": []}}}
+    elif func_name == "_firecrawl_scrape":
+        json_data = {"data": {"url": "https://example.com", "markdown": "# Example"}}
+
+    session = _RecordingSession(_FakeFirecrawlResponse(status=200, json_data=json_data))
+
+    def fake_client_session(*, trust_env):
+        session.trust_env = trust_env
+        return session
+
+    monkeypatch.setattr(tools.aiohttp, "ClientSession", fake_client_session)
+
+    await getattr(tools, func_name)(provider_settings, payload)
+
+    assert session.url == expected_url
+    assert session.trust_env is True

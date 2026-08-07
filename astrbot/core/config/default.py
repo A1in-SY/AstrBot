@@ -111,11 +111,17 @@ DEFAULT_CONFIG = {
         "web_search": False,
         "websearch_provider": "tavily",
         "websearch_tavily_key": [],
+        "websearch_tavily_base_url": "",
         "websearch_bocha_key": [],
+        "websearch_bocha_base_url": "",
         "websearch_brave_key": [],
+        "websearch_brave_base_url": "",
         "websearch_baidu_app_builder_key": "",
+        "websearch_baidu_base_url": "",
         "websearch_firecrawl_key": [],
+        "websearch_firecrawl_base_url": "",
         "websearch_exa_key": [],
+        "websearch_exa_base_url": "",
         "web_search_link": False,
         "display_reasoning_text": False,
         "identifier": False,
@@ -3346,11 +3352,29 @@ CONFIG_METADATA_3 = {
                             "provider_settings.web_search": True,
                         },
                     },
+                    "provider_settings.websearch_tavily_base_url": {
+                        "description": "Tavily API Base URL（可选）",
+                        "type": "string",
+                        "hint": "留空使用官方地址 https://api.tavily.com。请求会拼接 /search 和 /extract。",
+                        "condition": {
+                            "provider_settings.websearch_provider": "tavily",
+                            "provider_settings.web_search": True,
+                        },
+                    },
                     "provider_settings.websearch_bocha_key": {
                         "description": "BoCha API Key",
                         "type": "list",
                         "items": {"type": "string"},
                         "hint": "可添加多个 Key 进行轮询。",
+                        "condition": {
+                            "provider_settings.websearch_provider": "bocha",
+                            "provider_settings.web_search": True,
+                        },
+                    },
+                    "provider_settings.websearch_bocha_base_url": {
+                        "description": "BoCha API Base URL（可选）",
+                        "type": "string",
+                        "hint": "留空使用官方地址 https://api.bochaai.com。请求会拼接 /v1/web-search。",
                         "condition": {
                             "provider_settings.websearch_provider": "bocha",
                             "provider_settings.web_search": True,
@@ -3366,11 +3390,29 @@ CONFIG_METADATA_3 = {
                             "provider_settings.web_search": True,
                         },
                     },
+                    "provider_settings.websearch_brave_base_url": {
+                        "description": "Brave API Base URL（可选）",
+                        "type": "string",
+                        "hint": "留空使用官方地址 https://api.search.brave.com。请求会拼接 /res/v1/web/search。",
+                        "condition": {
+                            "provider_settings.websearch_provider": "brave",
+                            "provider_settings.web_search": True,
+                        },
+                    },
                     "provider_settings.websearch_firecrawl_key": {
                         "description": "Firecrawl API Key",
                         "type": "list",
                         "items": {"type": "string"},
                         "hint": "可添加多个 Key 进行轮询。",
+                        "condition": {
+                            "provider_settings.websearch_provider": "firecrawl",
+                            "provider_settings.web_search": True,
+                        },
+                    },
+                    "provider_settings.websearch_firecrawl_base_url": {
+                        "description": "Firecrawl API Base URL（可选）",
+                        "type": "string",
+                        "hint": "留空使用官方地址 https://api.firecrawl.dev。请求会拼接 /v2/search 和 /v2/scrape。",
                         "condition": {
                             "provider_settings.websearch_provider": "firecrawl",
                             "provider_settings.web_search": True,
@@ -3385,11 +3427,29 @@ CONFIG_METADATA_3 = {
                             "provider_settings.web_search": True,
                         },
                     },
+                    "provider_settings.websearch_baidu_base_url": {
+                        "description": "百度 AI 搜索 API Base URL（可选）",
+                        "type": "string",
+                        "hint": "留空使用官方地址 https://qianfan.baidubce.com。请求会拼接 /v2/ai_search/web_search。",
+                        "condition": {
+                            "provider_settings.websearch_provider": "baidu_ai_search",
+                            "provider_settings.web_search": True,
+                        },
+                    },
                     "provider_settings.websearch_exa_key": {
                         "description": "Exa API Key",
                         "type": "list",
                         "items": {"type": "string"},
                         "hint": "可添加多个 Key 进行轮询。Get a key at https://dashboard.exa.ai",
+                        "condition": {
+                            "provider_settings.websearch_provider": "exa",
+                            "provider_settings.web_search": True,
+                        },
+                    },
+                    "provider_settings.websearch_exa_base_url": {
+                        "description": "Exa API Base URL（可选）",
+                        "type": "string",
+                        "hint": "留空使用官方地址 https://api.exa.ai。请求会拼接 /search 和 /contents。",
                         "condition": {
                             "provider_settings.websearch_provider": "exa",
                             "provider_settings.web_search": True,

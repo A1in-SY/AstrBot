@@ -123,21 +123,41 @@
           "description": "Tavily API Key",
           "hint": "可添加多个 Key 进行轮询。"
         },
+        "websearch_tavily_base_url": {
+          "description": "Tavily API Base URL（可选）",
+          "hint": "留空使用官方地址 https://api.tavily.com。请求会拼接 /search 和 /extract。"
+        },
         "websearch_bocha_key": {
           "description": "BoCha API Key",
           "hint": "可添加多个 Key 进行轮询。"
+        },
+        "websearch_bocha_base_url": {
+          "description": "BoCha API Base URL（可选）",
+          "hint": "留空使用官方地址 https://api.bochaai.com。请求会拼接 /v1/web-search。"
         },
         "websearch_brave_key": {
           "description": "Brave Search API Key",
           "hint": "可添加多个 Key 进行轮询。"
         },
+        "websearch_brave_base_url": {
+          "description": "Brave API Base URL（可选）",
+          "hint": "留空使用官方地址 https://api.search.brave.com。请求会拼接 /res/v1/web/search。"
+        },
         "websearch_firecrawl_key": {
           "description": "Firecrawl API Key",
           "hint": "可添加多个 Key 进行轮询。"
         },
+        "websearch_firecrawl_base_url": {
+          "description": "Firecrawl API Base URL（可选）",
+          "hint": "留空使用官方地址 https://api.firecrawl.dev。请求会拼接 /v2/search 和 /v2/scrape。"
+        },
         "websearch_baidu_app_builder_key": {
           "description": "百度千帆智能云 APP Builder API Key",
           "hint": "参考:[https://console.bce.baidu.com/iam/#/iam/apikey/list](https://console.bce.baidu.com/iam/#/iam/apikey/list)"
+        },
+        "websearch_baidu_base_url": {
+          "description": "百度 AI 搜索 API Base URL（可选）",
+          "hint": "留空使用官方地址 https://qianfan.baidubce.com。请求会拼接 /v2/ai_search/web_search。"
         },
         "web_search_link": {
           "description": "显示来源引用"
@@ -145,6 +165,10 @@
         "websearch_exa_key": {
           "description": "Exa API Key",
           "hint": "可添加多个 Key 进行轮询。获取 Key: https://dashboard.exa.ai"
+        },
+        "websearch_exa_base_url": {
+          "description": "Exa API Base URL（可选）",
+          "hint": "留空使用官方地址 https://api.exa.ai。请求会拼接 /search 和 /contents。"
         }
       }
     },
