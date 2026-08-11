@@ -7,6 +7,15 @@ import click
 from . import __version__
 from .commands import conf, init, password, plug, run
 
+# Internal hidden entry used by frozen desktop builds to run a one-shot script
+# task worker.  It must be handled before click parses any arguments and
+# before any AstrBot core module is imported.
+if len(sys.argv) > 1 and sys.argv[1] == "--internal-script-task-worker":
+    from astrbot.script_runtime.worker import run as _script_task_worker_run
+
+    sys.exit(_script_task_worker_run())
+
+
 logo_tmpl = r"""
      ___           _______.___________..______      .______     ______   .___________.
     /   \         /       |           ||   _  \     |   _  \   /  __  \  |           |
