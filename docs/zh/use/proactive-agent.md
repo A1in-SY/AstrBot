@@ -2,6 +2,8 @@
 
 AstrBot 引入了主动 Agent（Proactive Agent）系统，使 AstrBot 不仅能被动响应用户，还能通过给自己下达未来的任务来在未来的指定时刻主动执行任务并向用户主动反馈结果（文本、图片、文件都可）。
 
+如果任务只是机械的固定流程（如定时抓取并判断后发送），且不需要 LLM 推理，建议改用 [脚本定时任务](./script-task.html)：定时执行不经过 LLM，更快也更省 Token。
+
 ![](https://files.astrbot.app/docs/source/images/proactive-agent/image.png)
 
 在 v4.14.0 引入，目前是**实验性功能**，未稳定。

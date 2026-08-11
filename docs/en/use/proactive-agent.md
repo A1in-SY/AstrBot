@@ -2,6 +2,8 @@
 
 AstrBot introduces a Proactive Agent system, enabling AstrBot to not only respond passively to users but also schedule future tasks and proactively execute them at specified times, delivering results (text, images, files, etc.) to users.
 
+If the task is a fixed mechanical workflow (fetch, compare, notify) that does not need LLM reasoning, prefer [Script Tasks](./script-task.html): scheduled execution skips the LLM entirely, running faster and without token cost.
+
 ![](https://files.astrbot.app/docs/source/images/proactive-agent/image.png)
 
 Introduced in v4.14.0, this is currently an **experimental feature** and not yet stable.
