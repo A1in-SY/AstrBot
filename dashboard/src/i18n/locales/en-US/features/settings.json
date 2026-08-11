@@ -65,6 +65,10 @@
       "t2iRendering": {
         "title": "Text-to-Image",
         "subtitle": "Rendering strategy, endpoint, and custom templates for text-to-image."
+      },
+      "scriptTasks": {
+        "title": "Script Tasks",
+        "subtitle": "Enable restricted Python script tasks, manage the UMO allowlist and execution limits."
       }
     },
     "messages": {

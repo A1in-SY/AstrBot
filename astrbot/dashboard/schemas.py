@@ -144,7 +144,72 @@ class ChatThreadMessageRequest(OpenModel):
 
 
 class CronJobRequest(OpenModel):
-    pass
+    """Create/Patch payload for cron jobs (compat alias)."""
+
+
+class CronJobCreateRequest(OpenModel):
+    job_type: str | None = None
+    name: str | None = None
+    cron_expression: str | None = None
+    note: str | None = None
+    description: str | None = None
+    session: str | None = None
+    bound_umo: str | None = None
+    timezone: str | None = None
+    enabled: bool | None = None
+    run_once: bool | None = None
+    run_at: str | None = None
+    source: str | None = None
+    language_version: str | None = None
+    payload: dict[str, Any] | None = None
+    persona_id: str | None = None
+    provider_id: str | None = None
+
+
+class CronJobPatchRequest(CronJobCreateRequest):
+    """Patch payload; job_type is immutable once a job exists."""
+
+
+class ScriptDiagnosticOccurrence(BaseModel):
+    line: int
+    column: int
+    end_line: int
+    end_column: int
+
+
+class ScriptDiagnostic(BaseModel):
+    code: str
+    severity: str
+    message: str
+    hint: str | None = None
+    occurrences: list[ScriptDiagnosticOccurrence] = []
+    occurrence_count: int = 0
+    suppressed_diagnostics: int = 0
+
+
+class ScriptValidationResult(BaseModel):
+    valid: bool
+    language_version: str
+    diagnostics: list[ScriptDiagnostic] = []
+    total_diagnostics: int = 0
+    truncated: bool = False
+
+
+class ScriptValidateRequest(BaseModel):
+    source: str
+    language_version: str = "astrbot-python-subset/v1"
+
+
+class ScriptLanguageVersionInfo(BaseModel):
+    language_version: str
+    display_name: str
+    deprecated: bool = False
+
+
+class ScriptLanguageRegistry(BaseModel):
+    default_language_version: str
+    versions: list[ScriptLanguageVersionInfo]
+    limits: dict[str, int]
 
 
 class CommandUpdateRequest(BaseModel):

@@ -1,4 +1,4 @@
-/* Auto-generated MDI subset – 273 icons */
+/* Auto-generated MDI subset – 274 icons */
 /* Do not edit manually. Run: pnpm run subset-icons */
 
 @font-face {
@@ -186,6 +186,10 @@
 
 .mdi-check-circle-outline::before {
   content: "\F05E1";
+}
+
+.mdi-check-decagram-outline::before {
+  content: "\F1740";
 }
 
 .mdi-checkbox-blank-outline::before {

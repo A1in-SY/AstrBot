@@ -615,11 +615,15 @@ const systemConfigHasChanges = computed(() => (
 const systemConfigGroups = computed(() => {
     const systemSection = systemConfigMetadata.value?.system_group?.metadata?.system || {};
     const systemItems = systemSection.items || {};
+    const scriptTaskItems =
+        systemConfigMetadata.value?.system_group?.metadata?.script_task?.items || {};
     const createGroup = (key, itemKeys) => {
         const items = {};
         itemKeys.forEach((itemKey) => {
             if (systemItems[itemKey]) {
                 items[itemKey] = systemItems[itemKey];
+            } else if (scriptTaskItems[itemKey]) {
+                items[itemKey] = scriptTaskItems[itemKey];
             }
         });
         return {
@@ -650,6 +654,14 @@ const systemConfigGroups = computed(() => {
             'dashboard.auth_rate_limit.max_burst',
             'dashboard.totp.enable'
         ]),
+        createGroup('scriptTasks', [
+            'script_task.enabled',
+            'script_task.allowed_umos',
+            'script_task.execution_timeout_seconds',
+            'script_task.max_source_bytes',
+            'script_task.max_ast_nodes',
+            'script_task.max_ast_depth'
+        ]),
         createGroup('logs', [
             'log_level',
             'log_file_enable',
@@ -678,7 +690,7 @@ const networkSystemConfigGroups = computed(() => systemConfigGroups.value.filter
     group.key === 'network'
 )));
 const securitySystemConfigGroups = computed(() => systemConfigGroups.value.filter((group) => (
-    group.key === 'webuiSecurity'
+    group.key === 'webuiSecurity' || group.key === 'scriptTasks'
 )));
 
 watch(

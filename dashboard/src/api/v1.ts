@@ -1210,6 +1210,9 @@ export const cronApi = {
   list(params?: CronJobListParams) {
     return typed<any>(openApiV1.listCronJobs({ query: generatedQuery(params) }));
   },
+  get(jobId: string) {
+    return typed<any>(openApiV1.getCronJob({ path: { job_id: jobId } }));
+  },
   create(payload: CronJobRequest) {
     return typed<any>(openApiV1.createCronJob({ body: payload }));
   },
@@ -1223,6 +1226,21 @@ export const cronApi = {
   },
   run(jobId: string) {
     return typed<any>(openApiV1.runCronJob({ path: { job_id: jobId } }));
+  },
+  validateScript(source: string, languageVersion: string) {
+    return typed<any>(
+      openApiV1.validateCronScript({
+        body: { source, language_version: languageVersion },
+      }),
+    );
+  },
+  scriptLanguages() {
+    return typed<any>(openApiV1.cronScriptLanguages());
+  },
+  resetState(jobId: string) {
+    return typed<any>(
+      openApiV1.resetCronScriptState({ path: { job_id: jobId } }),
+    );
   },
 };
 

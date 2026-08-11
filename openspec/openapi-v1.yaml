@@ -4715,6 +4715,20 @@ paths:
           $ref: "#/components/responses/Ok"
 
   /api/v1/cron/jobs/{job_id}:
+    get:
+      tags: [Cron]
+      summary: Get a cron job detail
+      operationId: getCronJob
+      x-astrbot-scope: system
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
     patch:
       tags: [Cron]
       summary: Update a cron job
@@ -4762,6 +4776,48 @@ paths:
           required: true
           schema:
             type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+
+  /api/v1/cron/jobs/{job_id}/state/reset:
+    post:
+      tags: [Cron]
+      summary: Reset script task state
+      operationId: resetCronScriptState
+      x-astrbot-scope: system
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+
+  /api/v1/cron/script/validate:
+    post:
+      tags: [Cron]
+      summary: Validate script task source
+      operationId: validateCronScript
+      x-astrbot-scope: system
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScriptValidateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+
+  /api/v1/cron/script/languages:
+    get:
+      tags: [Cron]
+      summary: List supported script language versions
+      operationId: cronScriptLanguages
+      x-astrbot-scope: system
       responses:
         "200":
           $ref: "#/components/responses/Ok"
@@ -6280,6 +6336,10 @@ components:
     CronJobRequest:
       type: object
       properties:
+        job_type:
+          type: string
+          enum: [active_agent, script]
+          default: active_agent
         name:
           type: string
         cron_expression:
@@ -6308,11 +6368,97 @@ components:
         payload:
           type: object
           additionalProperties: true
+        source:
+          type: string
+        language_version:
+          type: string
+        bound_umo:
+          type: string
       additionalProperties: true
 
     CronJobPatchRequest:
       allOf:
         - $ref: "#/components/schemas/CronJobRequest"
+
+    ScriptValidateRequest:
+      type: object
+      required: [source]
+      properties:
+        source:
+          type: string
+        language_version:
+          type: string
+          default: astrbot-python-subset/v1
+
+    ScriptDiagnosticOccurrence:
+      type: object
+      properties:
+        line:
+          type: integer
+        column:
+          type: integer
+        end_line:
+          type: integer
+        end_column:
+          type: integer
+
+    ScriptDiagnostic:
+      type: object
+      properties:
+        code:
+          type: string
+        severity:
+          type: string
+        message:
+          type: string
+        hint:
+          type: string
+          nullable: true
+        occurrences:
+          type: array
+          items:
+            $ref: "#/components/schemas/ScriptDiagnosticOccurrence"
+        occurrence_count:
+          type: integer
+        suppressed_diagnostics:
+          type: integer
+
+    ScriptValidationResult:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        language_version:
+          type: string
+        diagnostics:
+          type: array
+          items:
+            $ref: "#/components/schemas/ScriptDiagnostic"
+        total_diagnostics:
+          type: integer
+        truncated:
+          type: boolean
+
+    ScriptLanguageRegistry:
+      type: object
+      properties:
+        default_language_version:
+          type: string
+        versions:
+          type: array
+          items:
+            type: object
+            properties:
+              language_version:
+                type: string
+              display_name:
+                type: string
+              deprecated:
+                type: boolean
+        limits:
+          type: object
+          additionalProperties:
+            type: integer
 
     BackupExportRequest:
       type: object

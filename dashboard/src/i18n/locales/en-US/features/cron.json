@@ -168,6 +168,24 @@
     "createSuccess": "Created successfully",
     "createFailed": "Failed to create",
     "runStarted": "Started",
-    "runFailed": "Failed to run"
+    "runFailed": "Failed to run",
+    "scriptSourceRequired": "Script source is required",
+    "scriptUmoRequired": "Bound session UMO is required",
+    "stateReset": "State reset",
+    "stateResetFailed": "Failed to reset state"
+  },
+  "editor": {
+    "agentTask": "Agent Task",
+    "scriptTask": "Script Task",
+    "scriptHint": "Fixed script, no LLM",
+    "boundUmo": "Bound session (UMO) *",
+    "language": "Language version",
+    "runOnce": "Run once",
+    "validate": "Validate",
+    "valid": "Valid",
+    "invalid": "{count} diagnostic(s)",
+    "state": "Persistent state",
+    "resetState": "Reset state",
+    "confirmResetState": "Reset the persistent state of this script task?"
   }
 }

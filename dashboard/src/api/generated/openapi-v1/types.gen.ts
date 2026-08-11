@@ -244,6 +244,7 @@ export type CreateConfigProfileRequest = {
 export type CronJobPatchRequest = CronJobRequest;
 
 export type CronJobRequest = {
+    job_type?: 'active_agent' | 'script';
     name?: string;
     cron_expression?: string;
     timezone?: string;
@@ -258,8 +259,13 @@ export type CronJobRequest = {
     payload?: {
         [key: string]: unknown;
     };
+    source?: string;
+    language_version?: string;
+    bound_umo?: string;
     [key: string]: unknown | string | boolean;
 };
+
+export type job_type = 'active_agent' | 'script';
 
 export type DynamicConfig = {
     [key: string]: unknown;
@@ -622,6 +628,48 @@ export type ReorderRequest = {
         type: 'persona' | 'folder';
         sort_order: number;
     }>;
+};
+
+export type ScriptDiagnostic = {
+    code?: string;
+    severity?: string;
+    message?: string;
+    hint?: (string) | null;
+    occurrences?: Array<ScriptDiagnosticOccurrence>;
+    occurrence_count?: number;
+    suppressed_diagnostics?: number;
+};
+
+export type ScriptDiagnosticOccurrence = {
+    line?: number;
+    column?: number;
+    end_line?: number;
+    end_column?: number;
+};
+
+export type ScriptLanguageRegistry = {
+    default_language_version?: string;
+    versions?: Array<{
+        language_version?: string;
+        display_name?: string;
+        deprecated?: boolean;
+    }>;
+    limits?: {
+        [key: string]: (number);
+    };
+};
+
+export type ScriptValidateRequest = {
+    source: string;
+    language_version?: string;
+};
+
+export type ScriptValidationResult = {
+    valid?: boolean;
+    language_version?: string;
+    diagnostics?: Array<ScriptDiagnostic>;
+    total_diagnostics?: number;
+    truncated?: boolean;
 };
 
 export type SessionGroupRequest = {
@@ -3529,6 +3577,16 @@ export type CreateCronJobResponse = (SuccessEnvelope);
 
 export type CreateCronJobError = unknown;
 
+export type GetCronJobData = {
+    path: {
+        job_id: string;
+    };
+};
+
+export type GetCronJobResponse = (SuccessEnvelope);
+
+export type GetCronJobError = unknown;
+
 export type UpdateCronJobData = {
     body: CronJobPatchRequest;
     path: {
@@ -3559,6 +3617,28 @@ export type RunCronJobData = {
 export type RunCronJobResponse = (SuccessEnvelope);
 
 export type RunCronJobError = unknown;
+
+export type ResetCronScriptStateData = {
+    path: {
+        job_id: string;
+    };
+};
+
+export type ResetCronScriptStateResponse = (SuccessEnvelope);
+
+export type ResetCronScriptStateError = unknown;
+
+export type ValidateCronScriptData = {
+    body: ScriptValidateRequest;
+};
+
+export type ValidateCronScriptResponse = (SuccessEnvelope);
+
+export type ValidateCronScriptError = unknown;
+
+export type CronScriptLanguagesResponse = (SuccessEnvelope);
+
+export type CronScriptLanguagesError = unknown;
 
 export type StreamLiveLogsResponse = (string);
 

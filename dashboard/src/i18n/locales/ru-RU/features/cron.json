@@ -1,4 +1,4 @@
-﻿{
+{
   "header": {
     "eyebrow": "Automation",
     "live": "Живая синхронизация"
@@ -168,6 +168,24 @@
     "createSuccess": "Задача создана",
     "createFailed": "Ошибка создания",
     "runStarted": "Запущено",
-    "runFailed": "Ошибка запуска"
+    "runFailed": "Ошибка запуска",
+    "scriptSourceRequired": "Требуется исходный код скрипта",
+    "scriptUmoRequired": "Требуется привязанная сессия UMO",
+    "stateReset": "Состояние сброшено",
+    "stateResetFailed": "Не удалось сбросить состояние"
+  },
+  "editor": {
+    "agentTask": "Agent-задача",
+    "scriptTask": "Скрипт-задача",
+    "scriptHint": "Фиксированный скрипт без LLM",
+    "boundUmo": "Привязанная сессия (UMO) *",
+    "language": "Версия языка",
+    "runOnce": "Однократно",
+    "validate": "Проверить",
+    "valid": "Допустимо",
+    "invalid": "{count} диагностик(и)",
+    "state": "Постоянное состояние",
+    "resetState": "Сбросить состояние",
+    "confirmResetState": "Сбросить постоянное состояние этой скрипт-задачи?"
   }
 }

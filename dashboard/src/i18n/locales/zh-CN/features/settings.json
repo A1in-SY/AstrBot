@@ -65,6 +65,10 @@
       "t2iRendering": {
         "title": "文本转图像",
         "subtitle": "文本转图像渲染策略、端点和自定义模板。"
+      },
+      "scriptTasks": {
+        "title": "脚本定时任务",
+        "subtitle": "受限 Python 脚本定时任务的开关、UMO 白名单与执行限制。"
       }
     },
     "messages": {
