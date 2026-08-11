@@ -2,6 +2,7 @@
 
 import datetime
 import os
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -570,14 +571,50 @@ class TestBuiltinToolInjection:
 
         future_task_tool = MagicMock(spec=FunctionTool)
         future_task_tool.name = "future_task"
-        tool_mgr.get_builtin_tool.return_value = future_task_tool
+        script_task_tool = MagicMock(spec=FunctionTool)
+        script_task_tool.name = "script_task"
+        tool_mgr.get_builtin_tool.side_effect = [future_task_tool, script_task_tool]
+        mock_context.get_config.return_value = {"script_task": {"enabled": False}}
         mock_context.get_llm_tool_manager.return_value = tool_mgr
 
-        module._proactive_cron_job_tools(req, mock_context)
+        event = SimpleNamespace(unified_msg_origin="test:GroupMessage:g1")
+        module._proactive_cron_job_tools(req, mock_context, event)
 
         tool_mgr.get_builtin_tool.assert_called_once_with(module.FutureTaskTool)
         assert req.func_tool is not None
         assert req.func_tool.get_tool("future_task") is future_task_tool
+
+    @pytest.mark.asyncio
+    async def test_script_task_tool_injection_follows_allowlist(self, mock_context):
+        """script_task is injected only when enabled and the UMO is allowlisted."""
+        module = ama
+        req = ProviderRequest()
+        tool_mgr = MagicMock()
+
+        future_task_tool = MagicMock(spec=FunctionTool)
+        future_task_tool.name = "future_task"
+        script_task_tool = MagicMock(spec=FunctionTool)
+        script_task_tool.name = "script_task"
+        tool_mgr.get_builtin_tool.side_effect = [future_task_tool, script_task_tool]
+        mock_context.get_llm_tool_manager.return_value = tool_mgr
+        mock_context.get_config.return_value = {
+            "script_task": {
+                "enabled": True,
+                "allowed_umos": ["test:GroupMessage:g1"],
+            }
+        }
+
+        event = SimpleNamespace(unified_msg_origin="test:GroupMessage:g1")
+        module._proactive_cron_job_tools(req, mock_context, event)
+        assert req.func_tool.get_tool("future_task") is future_task_tool
+        assert req.func_tool.get_tool("script_task") is script_task_tool
+
+        denied_req = ProviderRequest()
+        tool_mgr.get_builtin_tool.side_effect = [future_task_tool, script_task_tool]
+        denied_event = SimpleNamespace(unified_msg_origin="other:GroupMessage:g9")
+        module._proactive_cron_job_tools(denied_req, mock_context, denied_event)
+        assert denied_req.func_tool.get_tool("future_task") is not None
+        assert denied_req.func_tool.get_tool("script_task") is None
 
 
 class TestApplyFileExtract:

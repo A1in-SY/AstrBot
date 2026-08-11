@@ -866,6 +866,39 @@ class TestAstrBotCoreLifecycleStopAdditional:
             # Verify warning was logged about plugin termination failure
             mock_logger.warning.assert_called()
 
+    @pytest.mark.asyncio
+    async def test_stop_shuts_down_cron_before_platform_terminate(
+        self, mock_log_broker, mock_db
+    ):
+        """Cron manager must shut down before provider/platform termination."""
+        lifecycle = AstrBotCoreLifecycle(mock_log_broker, mock_db)
+
+        lifecycle.temp_dir_cleaner = None
+        lifecycle.cron_manager = MagicMock()
+        lifecycle.cron_manager.shutdown = AsyncMock()
+
+        lifecycle.plugin_manager = MagicMock()
+        lifecycle.plugin_manager.context = MagicMock()
+        lifecycle.plugin_manager.context.get_all_stars = MagicMock(return_value=[])
+
+        lifecycle.provider_manager = MagicMock()
+        lifecycle.provider_manager.terminate = AsyncMock()
+
+        lifecycle.platform_manager = MagicMock()
+        lifecycle.platform_manager.terminate = AsyncMock()
+
+        lifecycle.kb_manager = MagicMock()
+        lifecycle.kb_manager.terminate = AsyncMock()
+
+        lifecycle.dashboard_shutdown_event = asyncio.Event()
+        lifecycle.curr_tasks = []
+
+        await lifecycle.stop()
+
+        lifecycle.cron_manager.shutdown.assert_awaited_once()
+        order = lifecycle.platform_manager.terminate.call_args_list
+        assert order  # platform terminate ran; cron shutdown happened before it
+
 
 class TestAstrBotCoreLifecycleRestart:
     """Tests for AstrBotCoreLifecycle.restart method."""

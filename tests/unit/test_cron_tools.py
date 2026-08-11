@@ -53,6 +53,7 @@ def test_future_task_schema_has_action_and_create_cron_guidance():
         "edit",
         "delete",
         "list",
+        "get",
     ]
 
     description = tool.parameters["properties"]["cron_expression"]["description"]
