@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -13,12 +14,21 @@ from apscheduler.triggers.date import DateTrigger
 from astrbot import logger
 from astrbot.core.agent.tool import ToolSet
 from astrbot.core.cron.events import CronMessageEvent
+from astrbot.core.cron.script_supervisor import (
+    ScriptRunRequest,
+    ScriptSupervisor,
+    build_proxy_snapshot,
+)
 from astrbot.core.db import BaseDatabase
-from astrbot.core.db.po import CronJob
+from astrbot.core.db.po import CronJob, CronScriptJob
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.provider.entites import ProviderRequest
 from astrbot.core.utils.history_saver import persist_agent_history
+from astrbot.script_runtime import spec
+from astrbot.script_runtime.diagnostics import ValidationResult
+from astrbot.script_runtime.errors import SendError, SendTargetUnavailableError
+from astrbot.script_runtime.validator import compute_source_hash
 
 if TYPE_CHECKING:
     from astrbot.core.star.context import Context
@@ -29,22 +39,7 @@ _CRONTAB_WEEKDAY_PATTERN = re.compile(r"^(?:(\*)|(\d+)(?:-(\d+))?)(?:/(\d+))?$")
 
 
 def _normalize_crontab_day_of_week(day_of_week: str) -> str:
-    """Normalize standard crontab weekdays for APScheduler.
-
-    APScheduler treats numeric weekdays as Monday=0, while standard crontab and
-    AstrBot's WebUI use Sunday=0/7. Numeric weekday fields are expanded to
-    weekday names so the scheduled day remains unambiguous.
-
-    Args:
-        day_of_week: The day-of-week field from a five-part crontab expression.
-
-    Returns:
-        A day-of-week field compatible with APScheduler.
-
-    Raises:
-        ValueError: If a numeric weekday value or step is outside the supported
-            crontab range.
-    """
+    """Normalize standard crontab weekdays for APScheduler."""
     normalized_parts: list[str] = []
     for raw_part in day_of_week.split(","):
         part = raw_part.strip().lower()
@@ -52,12 +47,10 @@ def _normalize_crontab_day_of_week(day_of_week: str) -> str:
         if not match:
             normalized_parts.append(part)
             continue
-
         wildcard, start_text, end_text, step_text = match.groups()
         step = int(step_text or "1")
         if step < 1:
             raise ValueError("day_of_week step must be greater than 0")
-
         if wildcard:
             if step == 1:
                 normalized_parts.append("*")
@@ -73,44 +66,79 @@ def _normalize_crontab_day_of_week(day_of_week: str) -> str:
             if end is None:
                 end = 7 if step_text else start
             values = range(start, end + 1, step)
-
         weekdays: list[int] = []
         for value in values:
             weekday = 0 if value == 7 else value
             if weekday not in weekdays:
                 weekdays.append(weekday)
-
         if len(weekdays) == 7:
             normalized_parts.append("*")
         else:
             normalized_parts.extend(_CRONTAB_WEEKDAY_NAMES[value] for value in weekdays)
-
     return ",".join(normalized_parts)
 
 
 class CronJobSchedulingError(Exception):
-    """Raised when a cron job fails to be scheduled."""
+    """Raised when a cron job cannot be scheduled or its schedule is invalid."""
 
-    pass
+
+class CronJobNotFoundError(Exception):
+    """Raised when an operation targets a missing cron job."""
+
+
+class CronJobAlreadyRunningError(Exception):
+    """Raised when a manual run is requested for an already-running job."""
+
+
+class CronJobShuttingDownError(Exception):
+    """Raised when admission is attempted during shutdown."""
+
+
+class CronScriptNotAuthorizedError(Exception):
+    """Raised when a manual script run is blocked by the UMO allowlist."""
+
+
+class CronScriptDefinitionError(Exception):
+    """Raised when a script task has an integrity or definition problem."""
+
+
+class CronScriptValidationError(Exception):
+    """Raised when a script task creation/edit fails static validation."""
+
+    def __init__(self, validation: ValidationResult) -> None:
+        self.validation = validation
+        super().__init__("script source failed static validation")
 
 
 class CronJobManager:
-    """Central scheduler for BasicCronJob and ActiveAgentCronJob."""
+    """Central scheduler for basic, active-agent and script cron jobs."""
 
     def __init__(self, db: BaseDatabase) -> None:
         self.db = db
         self.scheduler = AsyncIOScheduler()
         self._basic_handlers: dict[str, Callable[..., Any]] = {}
-        self._lock = asyncio.Lock()
+        self._mutation_lock = asyncio.Lock()
+        self._run_claim_lock = asyncio.Lock()
+        self._running_job_ids: set[str] = set()
+        self._active_run_tasks: set[asyncio.Task] = set()
         self._started = False
-        # The scheduler may start early via _schedule_job; track DB sync separately.
         self._db_synced = False
+        self._shutting_down = False
+        self.ctx: Context | None = None
+        self.script_supervisor = ScriptSupervisor()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
     async def start(self, ctx: "Context") -> None:
-        self.ctx: Context = ctx  # star context
-        async with self._lock:
+        self.ctx = ctx
+        async with self._mutation_lock:
             if self._db_synced:
                 return
+            await self.db.mark_running_cron_jobs_interrupted(
+                "Interrupted by AstrBot restart before completion."
+            )
             if not self._started:
                 self.scheduler.start()
                 self._started = True
@@ -118,16 +146,32 @@ class CronJobManager:
             self._db_synced = True
 
     async def shutdown(self) -> None:
-        async with self._lock:
-            if not self._started:
+        async with self._mutation_lock:
+            if not self._started and not self._active_run_tasks:
+                self._db_synced = False
                 return
-            self.scheduler.shutdown(wait=False)
-            await asyncio.sleep(0)
-            self._started = False
-            self._db_synced = False
+            self._shutting_down = True
+            try:
+                self.scheduler.shutdown(wait=False)
+            finally:
+                self._started = False
+        await self.script_supervisor.shutdown()
+        tasks = list(self._active_run_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._running_job_ids.clear()
+        self._active_run_tasks.clear()
+        self._db_synced = False
+        self._shutting_down = False
 
     async def sync_from_db(self) -> None:
         jobs = await self.db.list_cron_jobs()
+        summaries = {
+            summary.job.job_id: summary
+            for summary in await self.db.list_script_cron_job_summaries()
+        }
         for job in jobs:
             if not job.enabled or not job.persistent:
                 continue
@@ -137,10 +181,38 @@ class CronJobManager:
                     job.job_id,
                 )
                 continue
+            if job.job_type == "script":
+                summary = summaries.get(job.job_id)
+                if summary is None:
+                    await self.db.update_cron_job(
+                        job.job_id,
+                        status="failed",
+                        next_run_time=None,
+                        last_error=(
+                            "Script task definition row is missing; re-create or "
+                            "delete the job."
+                        ),
+                    )
+                    continue
+                if summary.language_version not in spec.SUPPORTED_LANGUAGE_VERSIONS:
+                    await self.db.update_cron_job(
+                        job.job_id,
+                        status="unsupported_language_version",
+                        next_run_time=None,
+                        last_error=(
+                            "Unsupported script language version "
+                            f"{summary.language_version!r}; migrate from the Dashboard."
+                        ),
+                    )
+                    continue
             try:
-                self._schedule_job(job)
+                await self._schedule_job(job)
             except CronJobSchedulingError:
                 continue  # Error already logged in _schedule_job
+
+    # ------------------------------------------------------------------
+    # Create
+    # ------------------------------------------------------------------
 
     async def add_basic_job(
         self,
@@ -166,7 +238,8 @@ class CronJobManager:
         )
         self._basic_handlers[job.job_id] = handler
         if enabled:
-            self._schedule_job(job)
+            async with self._mutation_lock:
+                await self._schedule_job(job)
         return job
 
     async def add_active_job(
@@ -182,7 +255,6 @@ class CronJobManager:
         run_once: bool = False,
         run_at: datetime | None = None,
     ) -> CronJob:
-        # If run_once with run_at, store run_at in payload for later reference.
         if run_once and run_at:
             payload = {**payload, "run_at": run_at.isoformat()}
         job = await self.db.create_cron_job(
@@ -197,72 +269,232 @@ class CronJobManager:
             run_once=run_once,
         )
         if enabled:
-            self._schedule_job(job)
+            async with self._mutation_lock:
+                await self._schedule_job(job)
         return job
+
+    async def add_script_job(
+        self,
+        *,
+        name: str,
+        cron_expression: str | None,
+        source: str,
+        bound_umo: str,
+        description: str | None = None,
+        timezone: str | None = None,
+        enabled: bool = True,
+        run_once: bool = False,
+        run_at: datetime | None = None,
+        creator_sender_id: str | None = None,
+        language_version: str = spec.DEFAULT_LANGUAGE_VERSION,
+    ) -> CronScriptJob:
+        if run_once and not run_at:
+            raise CronJobSchedulingError("run_at is required when run_once=true")
+        if (not run_once) and not cron_expression:
+            raise CronJobSchedulingError(
+                "cron_expression is required when run_once=false"
+            )
+        validation = await self.validate_script_source(source, language_version)
+        if not validation.valid:
+            raise CronScriptValidationError(validation)
+        job_id = str(uuid.uuid4())
+        payload = {"run_at": run_at.isoformat()} if (run_once and run_at) else {}
+        aggregate = await self.db.create_script_cron_job(
+            name=name,
+            cron_expression=cron_expression,
+            timezone=timezone,
+            payload=payload,
+            description=description,
+            enabled=enabled,
+            run_once=run_once,
+            job_id=job_id,
+            source=source,
+            source_hash=compute_source_hash(source),
+            language_version=language_version,
+            bound_umo=bound_umo,
+            creator_sender_id=creator_sender_id,
+        )
+        if enabled:
+            try:
+                async with self._mutation_lock:
+                    await self._schedule_job(aggregate.job)
+            except CronJobSchedulingError:
+                self._remove_scheduled(job_id)
+                await self.db.delete_cron_job(job_id)
+                raise
+        else:
+            await self.db.update_cron_job(job_id, next_run_time=None)
+        return aggregate
+
+    async def validate_script_source(
+        self,
+        source: str,
+        language_version: str = spec.DEFAULT_LANGUAGE_VERSION,
+    ) -> ValidationResult:
+        return await self.script_supervisor.validate(
+            source,
+            language_version=language_version,
+            limits=self._script_limits(),
+        )
+
+    # ------------------------------------------------------------------
+    # Update / delete
+    # ------------------------------------------------------------------
 
     async def update_job(self, job_id: str, **kwargs) -> CronJob | None:
-        job = await self.db.update_cron_job(job_id, **kwargs)
-        if not job:
+        async with self._mutation_lock:
+            job = await self.db.get_cron_job(job_id)
+            if job is None:
+                return None
+            if job.job_type == "script":
+                return await self._update_script_job_locked(job, kwargs)
+            return await self._update_generic_job_locked(job, kwargs)
+
+    async def _update_generic_job_locked(
+        self,
+        old_job: CronJob,
+        kwargs: dict[str, Any],
+    ) -> CronJob | None:
+        candidate = self._merged_job(old_job, kwargs)
+        try:
+            self._build_trigger(candidate)
+        except (ValueError, TypeError) as exc:
+            raise CronJobSchedulingError(str(exc)) from exc
+        self._remove_scheduled(old_job.job_id)
+        try:
+            updated = await self.db.update_cron_job(old_job.job_id, **kwargs)
+        except Exception:
+            await self._restore_schedule(old_job)
+            raise
+        if updated is None:
+            await self._restore_schedule(old_job)
             return None
-        self._remove_scheduled(job_id)
-        if job.enabled:
-            self._schedule_job(job)
-        return job
+        try:
+            if updated.enabled:
+                await self._schedule_job(updated)
+            else:
+                await self.db.update_cron_job(updated.job_id, next_run_time=None)
+        except CronJobSchedulingError:
+            await self._restore_definition_fields(old_job, kwargs)
+            await self._restore_schedule(old_job)
+            raise
+        return updated
+
+    async def _update_script_job_locked(
+        self,
+        old_job: CronJob,
+        kwargs: dict[str, Any],
+    ) -> CronJob | None:
+        old_aggregate = await self.db.get_script_cron_job(old_job.job_id)
+        if old_aggregate is None:
+            raise CronScriptDefinitionError("script task definition row is missing")
+        source = kwargs.get("source", old_aggregate.script.source)
+        language_version = kwargs.get(
+            "language_version", old_aggregate.script.language_version
+        )
+        if "source" in kwargs or "language_version" in kwargs:
+            validation = await self.validate_script_source(
+                str(source), str(language_version)
+            )
+            if not validation.valid:
+                raise CronScriptValidationError(validation)
+        source_hash = compute_source_hash(str(source))
+        bound_umo = kwargs.get("bound_umo", old_aggregate.script.bound_umo)
+        candidate = self._merged_job(old_job, kwargs)
+        try:
+            self._build_trigger(candidate)
+        except (ValueError, TypeError) as exc:
+            raise CronJobSchedulingError(str(exc)) from exc
+        self._remove_scheduled(old_job.job_id)
+        try:
+            script_kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if key
+                in {
+                    "name",
+                    "cron_expression",
+                    "timezone",
+                    "payload",
+                    "description",
+                    "enabled",
+                    "run_once",
+                    "status",
+                    "next_run_time",
+                    "last_run_at",
+                    "last_error",
+                }
+            }
+            updated = await self.db.update_script_cron_job(
+                old_job.job_id,
+                **script_kwargs,
+                source=source,
+                source_hash=source_hash,
+                language_version=language_version,
+                bound_umo=bound_umo,
+            )
+        except Exception:
+            await self._restore_schedule(old_job)
+            raise
+        if updated is None:
+            await self._restore_schedule(old_job)
+            return None
+        try:
+            if updated.job.enabled:
+                await self._schedule_job(updated.job)
+            else:
+                await self.db.update_cron_job(updated.job.job_id, next_run_time=None)
+        except CronJobSchedulingError:
+            await self._restore_script_definition(old_aggregate, kwargs)
+            await self._restore_schedule(old_job)
+            raise
+        return updated.job
 
     async def delete_job(self, job_id: str) -> None:
-        self._remove_scheduled(job_id)
-        self._basic_handlers.pop(job_id, None)
-        await self.db.delete_cron_job(job_id)
+        async with self._mutation_lock:
+            job = await self.db.get_cron_job(job_id)
+            if job is not None:
+                self._remove_scheduled(job_id)
+                self._basic_handlers.pop(job_id, None)
+            try:
+                await self.db.delete_cron_job(job_id)
+            except Exception:
+                if job is not None:
+                    await self._restore_schedule(job)
+                raise
+
+    async def reset_script_cron_state(self, job_id: str) -> CronScriptJob:
+        async with self._run_claim_lock:
+            if job_id in self._running_job_ids:
+                raise CronJobAlreadyRunningError(job_id)
+            ok = await self.db.reset_script_cron_state(job_id)
+            if not ok:
+                raise CronJobNotFoundError(job_id)
+            aggregate = await self.db.get_script_cron_job(job_id)
+            if aggregate is None:
+                raise CronJobNotFoundError(job_id)
+            return aggregate
 
     async def list_jobs(self, job_type: str | None = None) -> list[CronJob]:
         return await self.db.list_cron_jobs(job_type)
+
+    async def get_script_job(self, job_id: str) -> CronScriptJob | None:
+        return await self.db.get_script_cron_job(job_id)
+
+    # ------------------------------------------------------------------
+    # Scheduling internals
+    # ------------------------------------------------------------------
 
     def _remove_scheduled(self, job_id: str) -> None:
         if self.scheduler.get_job(job_id):
             self.scheduler.remove_job(job_id)
 
-    def _schedule_job(self, job: CronJob) -> None:
+    async def _schedule_job(self, job: CronJob) -> None:
         if not self._started:
             self.scheduler.start()
             self._started = True
         try:
-            tzinfo = None
-            if job.timezone:
-                try:
-                    tzinfo = ZoneInfo(job.timezone)
-                except Exception:
-                    logger.warning(
-                        "Invalid timezone %s for cron job %s, fallback to system.",
-                        job.timezone,
-                        job.job_id,
-                    )
-            if job.run_once:
-                run_at_str = None
-                if isinstance(job.payload, dict):
-                    run_at_str = job.payload.get("run_at")
-                run_at_str = run_at_str or job.cron_expression
-                if not run_at_str:
-                    raise ValueError("run_once job missing run_at timestamp")
-                run_at = datetime.fromisoformat(run_at_str)
-                if run_at.tzinfo is None and tzinfo is not None:
-                    run_at = run_at.replace(tzinfo=tzinfo)
-                trigger = DateTrigger(run_date=run_at, timezone=tzinfo)
-            else:
-                if not job.cron_expression:
-                    raise ValueError("recurring job missing cron_expression")
-                minute, hour, day, month, day_of_week = job.cron_expression.split()
-                normalized_cron_expression = " ".join(
-                    [
-                        minute,
-                        hour,
-                        day,
-                        month,
-                        _normalize_crontab_day_of_week(day_of_week),
-                    ]
-                )
-                trigger = CronTrigger.from_crontab(
-                    normalized_cron_expression, timezone=tzinfo
-                )
+            trigger = self._build_trigger(job)
             self.scheduler.add_job(
                 self._run_job,
                 id=job.job_id,
@@ -270,15 +502,49 @@ class CronJobManager:
                 args=[job.job_id],
                 replace_existing=True,
                 misfire_grace_time=30,
+                max_instances=1,
             )
-            asyncio.create_task(
-                self.db.update_cron_job(
-                    job.job_id, next_run_time=self._get_next_run_time(job.job_id)
-                )
-            )
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError) as exc:
             logger.exception("Failed to schedule cron job %s", job.job_id)
-            raise CronJobSchedulingError(str(e)) from e
+            raise CronJobSchedulingError(str(exc)) from exc
+        next_run = self._get_next_run_time(job.job_id)
+        await self.db.update_cron_job(job.job_id, next_run_time=next_run)
+
+    def _build_trigger(self, job: CronJob) -> CronTrigger | DateTrigger:
+        tzinfo = None
+        if job.timezone:
+            try:
+                tzinfo = ZoneInfo(job.timezone)
+            except Exception:
+                logger.warning(
+                    "Invalid timezone %s for cron job %s, fallback to system.",
+                    job.timezone,
+                    job.job_id,
+                )
+        if job.run_once:
+            run_at_str = None
+            if isinstance(job.payload, dict):
+                run_at_str = job.payload.get("run_at")
+            run_at_str = run_at_str or job.cron_expression
+            if not run_at_str:
+                raise ValueError("run_once job missing run_at timestamp")
+            run_at = datetime.fromisoformat(run_at_str)
+            if run_at.tzinfo is None and tzinfo is not None:
+                run_at = run_at.replace(tzinfo=tzinfo)
+            return DateTrigger(run_date=run_at, timezone=tzinfo)
+        if not job.cron_expression:
+            raise ValueError("recurring job missing cron_expression")
+        minute, hour, day, month, day_of_week = job.cron_expression.split()
+        normalized = " ".join(
+            [
+                minute,
+                hour,
+                day,
+                month,
+                _normalize_crontab_day_of_week(day_of_week),
+            ]
+        )
+        return CronTrigger.from_crontab(normalized, timezone=tzinfo)
 
     def _get_next_run_time(self, job_id: str):
         aps_job = self.scheduler.get_job(job_id)
@@ -286,8 +552,145 @@ class CronJobManager:
             return None
         return aps_job.next_run_time.astimezone(timezone.utc)
 
+    async def _restore_schedule(self, job: CronJob) -> None:
+        if job.enabled:
+            try:
+                await self._schedule_job(job)
+            except CronJobSchedulingError:
+                logger.error("Failed to restore schedule for cron job %s", job.job_id)
+
+    async def _restore_definition_fields(
+        self,
+        old_job: CronJob,
+        kwargs: dict[str, Any],
+    ) -> None:
+        restore: dict[str, Any] = {}
+        for key in kwargs:
+            if key in {
+                "name",
+                "cron_expression",
+                "timezone",
+                "payload",
+                "description",
+                "enabled",
+                "run_once",
+                "status",
+                "next_run_time",
+                "last_run_at",
+                "last_error",
+            }:
+                restore[key] = getattr(old_job, key)
+        if restore:
+            await self.db.update_cron_job(old_job.job_id, **restore)
+
+    async def _restore_script_definition(
+        self,
+        old_aggregate: CronScriptJob,
+        kwargs: dict[str, Any],
+    ) -> None:
+        script = old_aggregate.script
+        public: dict[str, Any] = {}
+        for key in kwargs:
+            if key in {
+                "name",
+                "cron_expression",
+                "timezone",
+                "payload",
+                "description",
+                "enabled",
+                "run_once",
+                "status",
+                "next_run_time",
+                "last_run_at",
+                "last_error",
+            }:
+                public[key] = getattr(old_aggregate.job, key)
+        await self.db.update_script_cron_job(
+            old_aggregate.job.job_id,
+            **public,
+            source=script.source,
+            source_hash=script.source_hash,
+            language_version=script.language_version,
+            bound_umo=script.bound_umo,
+        )
+
+    @staticmethod
+    def _merged_job(old_job: CronJob, kwargs: dict[str, Any]) -> CronJob:
+        candidate = CronJob(**{col: getattr(old_job, col) for col in _CRON_JOB_COLUMNS})
+        for key, value in kwargs.items():
+            if hasattr(candidate, key):
+                setattr(candidate, key, value)
+        return candidate
+
+    # ------------------------------------------------------------------
+    # Execution
+    # ------------------------------------------------------------------
+
     async def run_job_now(self, job_id: str) -> None:
-        await self._run_job(job_id, ignore_enabled=True, delete_run_once=False)
+        """Admit a manual run and return after the background task is created."""
+        await self._admit_and_run(job_id, manual=True, delete_run_once=False)
+
+    async def _admit_and_run(
+        self,
+        job_id: str,
+        *,
+        manual: bool,
+        delete_run_once: bool,
+    ) -> bool:
+        snapshot = await self._admit(job_id, manual=manual)
+        if snapshot is None:
+            return False
+        task = asyncio.create_task(
+            self._run_claimed(
+                job_id,
+                snapshot,
+                manual=manual,
+                delete_run_once=delete_run_once,
+            )
+        )
+        self._active_run_tasks.add(task)
+        task.add_done_callback(self._active_run_tasks.discard)
+        return True
+
+    async def _admit(
+        self,
+        job_id: str,
+        *,
+        manual: bool,
+    ) -> CronJob | CronScriptJob | None:
+        async with self._run_claim_lock:
+            if self._shutting_down:
+                raise CronJobShuttingDownError("cron manager is shutting down")
+            if job_id in self._running_job_ids:
+                if manual:
+                    raise CronJobAlreadyRunningError(job_id)
+                return None
+            job = await self.db.get_cron_job(job_id)
+            if job is None:
+                if manual:
+                    raise CronJobNotFoundError(job_id)
+                return None
+            if not job.enabled and not manual:
+                return None
+            if job.job_type == "script":
+                aggregate = await self.db.get_script_cron_job(job_id)
+                if aggregate is None:
+                    if manual:
+                        raise CronScriptDefinitionError(
+                            "script task definition row is missing"
+                        )
+                    return None
+                authorized, reason = self._script_authorization(
+                    aggregate.script.bound_umo
+                )
+                if not authorized:
+                    if manual:
+                        raise CronScriptNotAuthorizedError(reason)
+                    return None
+                self._running_job_ids.add(job_id)
+                return aggregate
+            self._running_job_ids.add(job_id)
+            return job
 
     async def _run_job(
         self,
@@ -296,38 +699,246 @@ class CronJobManager:
         ignore_enabled: bool = False,
         delete_run_once: bool = True,
     ) -> None:
-        job = await self.db.get_cron_job(job_id)
-        if not job or (not job.enabled and not ignore_enabled):
-            return
-        start_time = datetime.now(timezone.utc)
-        await self.db.update_cron_job(
-            job_id, status="running", last_run_at=start_time, last_error=None
+        await self._admit_and_run(
+            job_id,
+            manual=ignore_enabled,
+            delete_run_once=delete_run_once,
         )
-        status = "completed"
-        last_error = None
+
+    async def _run_claimed(
+        self,
+        job_id: str,
+        snapshot: CronJob | CronScriptJob,
+        *,
+        manual: bool,
+        delete_run_once: bool,
+    ) -> None:
+        start_time = datetime.now(timezone.utc)
         try:
-            if job.job_type == "basic":
-                await self._run_basic_job(job)
-            elif job.job_type == "active_agent":
-                await self._run_active_agent_job(job, start_time=start_time)
+            if isinstance(snapshot, CronScriptJob):
+                await self._run_script_job(snapshot, start_time, delete_run_once)
             else:
-                raise ValueError(f"Unknown cron job type: {job.job_type}")
-        except Exception as e:  # noqa: BLE001
-            status = "failed"
-            last_error = str(e)
-            logger.error(f"Cron job {job_id} failed: {e!s}", exc_info=True)
+                job = snapshot
+                try:
+                    if job.job_type == "basic":
+                        await self._run_basic_job(job)
+                    elif job.job_type == "active_agent":
+                        await self._run_active_agent_job(job, start_time=start_time)
+                    else:
+                        raise ValueError(f"Unknown cron job type: {job.job_type}")
+                except Exception as e:  # noqa: BLE001
+                    await self._finalize_failure(
+                        job_id, start_time, str(e), delete_run_once
+                    )
+                    return
+                next_run = self._get_next_run_time(job_id)
+                await self.db.update_cron_job(
+                    job_id,
+                    status="completed",
+                    last_run_at=start_time,
+                    last_error=None,
+                    next_run_time=next_run,
+                )
+                if job.run_once and delete_run_once:
+                    await self.delete_job(job_id)
         finally:
-            next_run = self._get_next_run_time(job_id)
+            async with self._run_claim_lock:
+                self._running_job_ids.discard(job_id)
+
+    async def _finalize_failure(
+        self,
+        job_id: str,
+        start_time: datetime,
+        error: str,
+        delete_run_once: bool,
+    ) -> None:
+        next_run = self._get_next_run_time(job_id)
+        await self.db.update_cron_job(
+            job_id,
+            status="failed",
+            last_run_at=start_time,
+            last_error=error,
+            next_run_time=next_run,
+        )
+        job = await self.db.get_cron_job(job_id)
+        if job and job.run_once and delete_run_once:
+            await self.delete_job(job_id)
+
+    async def _run_script_job(
+        self,
+        aggregate: CronScriptJob,
+        start_time: datetime,
+        delete_run_once: bool,
+    ) -> None:
+        job = aggregate.job
+        script = aggregate.script
+        job_id = job.job_id
+
+        # Pre-execution gates (no worker, no side effects until they pass).
+        if script.language_version not in spec.SUPPORTED_LANGUAGE_VERSIONS:
+            await self._finalize_failure(
+                job_id,
+                start_time,
+                f"Unsupported script language version {script.language_version!r}",
+                delete_run_once,
+            )
+            return
+        if compute_source_hash(script.source) != script.source_hash:
+            await self._finalize_failure(
+                job_id,
+                start_time,
+                "Script source hash mismatch: definition may have been modified.",
+                delete_run_once,
+            )
+            return
+        validation = await self.validate_script_source(
+            script.source, script.language_version
+        )
+        if not validation.valid:
+            await self._finalize_failure(
+                job_id,
+                start_time,
+                "Script source failed static validation before execution.",
+                delete_run_once,
+            )
+            return
+        try:
+            session = MessageSession.from_str(script.bound_umo)
+        except Exception as exc:  # noqa: BLE001
+            await self._finalize_failure(
+                job_id,
+                start_time,
+                f"Invalid bound session {script.bound_umo!r}: {exc}",
+                delete_run_once,
+            )
+            return
+
+        await self.db.update_cron_job(
+            job_id,
+            status="running",
+            last_run_at=start_time,
+            last_error=None,
+        )
+
+        async def send_handler(text: str) -> None:
+            if self.ctx is None:
+                raise SendTargetUnavailableError("context is not available")
+            from astrbot.core.message.components import Plain
+            from astrbot.core.message.message_event_result import MessageChain
+
+            try:
+                ok = await self.ctx.send_message(
+                    session,
+                    MessageChain([Plain(text)]),
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise SendError(str(exc)) from exc
+            if not ok:
+                raise SendTargetUnavailableError(
+                    "no platform adapter matched the bound session"
+                )
+
+        request = ScriptRunRequest(
+            job_id=job_id,
+            run_id=str(uuid.uuid4()),
+            source=script.source,
+            source_hash=script.source_hash,
+            language_version=script.language_version,
+            initial_state=dict(script.state or {}),
+            run_started_at=start_time.isoformat(),
+            run_timezone=job.timezone or "system",
+            limits=self._script_limits(),
+            proxy_snapshot=build_proxy_snapshot(self._global_config()),
+        )
+        result = await self.script_supervisor.execute(
+            request,
+            send_handler=send_handler,
+        )
+        if result.worker_stderr_tail:
+            logger.error(
+                "Script cron job %s run %s stderr: %s",
+                job_id,
+                request.run_id,
+                result.worker_stderr_tail[:2000],
+            )
+        next_run = self._get_next_run_time(job_id)
+        if result.success:
+            committed = await self.db.commit_script_cron_state(
+                job_id,
+                result.state or {},
+                expected_source_hash=script.source_hash,
+                expected_bound_umo=script.bound_umo,
+                expected_language_version=script.language_version,
+            )
+            if not committed:
+                logger.info(
+                    "Script cron job %s completed but state was discarded "
+                    "(definition changed or job deleted).",
+                    job_id,
+                )
             await self.db.update_cron_job(
                 job_id,
-                status=status,
+                status="completed",
                 last_run_at=start_time,
-                last_error=last_error,
+                last_error=None,
                 next_run_time=next_run,
             )
-            if job.run_once and delete_run_once:
-                # one-shot: remove after execution regardless of success
-                await self.delete_job(job_id)
+        else:
+            await self.db.update_cron_job(
+                job_id,
+                status="failed",
+                last_run_at=start_time,
+                last_error=result.message or result.error_code,
+                next_run_time=next_run,
+            )
+        if job.run_once and delete_run_once:
+            await self.delete_job(job_id)
+
+    # ------------------------------------------------------------------
+    # Script configuration and authorization
+    # ------------------------------------------------------------------
+
+    def _global_config(self) -> dict[str, Any]:
+        if self.ctx is None:
+            return {}
+        try:
+            config = self.ctx.get_config()
+            return dict(config) if isinstance(config, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _script_config(self) -> dict[str, Any]:
+        config = self._global_config()
+        script_cfg = config.get("script_task") or {}
+        return script_cfg if isinstance(script_cfg, dict) else {}
+
+    def _script_limits(self) -> dict[str, int]:
+        script_cfg = self._script_config()
+        limits = dict(spec.DEFAULT_LIMITS)
+        for key in spec.LIMIT_KEYS:
+            raw = script_cfg.get(key)
+            if raw is None:
+                continue
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                limits[key] = value
+        return limits
+
+    def _script_authorization(self, bound_umo: str) -> tuple[bool, str | None]:
+        script_cfg = self._script_config()
+        if not script_cfg.get("enabled", False):
+            return False, "SCRIPT_TASKS_DISABLED"
+        allowed = script_cfg.get("allowed_umos") or []
+        if not isinstance(allowed, list) or bound_umo not in allowed:
+            return False, "BOUND_UMO_NOT_ALLOWED"
+        return True, None
+
+    # ------------------------------------------------------------------
+    # Basic / active-agent internals (unchanged behavior)
+    # ------------------------------------------------------------------
 
     async def _run_basic_job(self, job: CronJob) -> None:
         handler = self._basic_handlers.get(job.job_id)
@@ -349,7 +960,6 @@ class CronJobManager:
             )
         )
         note = payload.get("note") or job.description or job.name
-
         extras = {
             "cron_job": {
                 "id": job.job_id,
@@ -366,7 +976,6 @@ class CronJobManager:
             },
             "cron_payload": payload,
         }
-
         await self._woke_main_agent(
             message=note,
             session_str=session_str,
@@ -393,6 +1002,8 @@ class CronJobManager:
         )
         from astrbot.core.tools.message_tools import SendMessageToUserTool
 
+        if self.ctx is None:
+            raise RuntimeError("cron context is not available")
         try:
             session = (
                 session_str
@@ -410,8 +1021,6 @@ class CronJobManager:
             extras=extras or {},
             message_type=session.message_type,
         )
-
-        # judge user's role
         umo = cron_event.unified_msg_origin
         cfg = self.ctx.get_config(umo=umo)
         cron_payload = extras.get("cron_payload", {}) if extras else {}
@@ -421,7 +1030,6 @@ class CronJobManager:
             cron_event.role = "admin" if sender_id in admin_ids else "member"
         if cron_payload.get("origin", "tool") == "api":
             cron_event.role = "admin"
-
         provider_settings = cfg.get("provider_settings", {}) or {}
         tool_call_timeout = provider_settings.get("tool_call_timeout", 120)
         config = MainAgentBuildConfig(
@@ -433,7 +1041,6 @@ class CronJobManager:
         req = ProviderRequest()
         conv = await _get_session_conv(event=cron_event, plugin_context=self.ctx)
         req.conversation = conv
-        # finetine the messages
         context = json.loads(conv.history)
         if context:
             req.contexts = context
@@ -441,9 +1048,7 @@ class CronJobManager:
             req.contexts = []
             req.system_prompt += (
                 "\n\nBellow is you and user previous conversation history:\n"
-                f"---\n"
-                f"{context_dump}\n"
-                f"---\n"
+                f"---\n{context_dump}\n---\n"
             )
         cron_job_str = json.dumps(extras.get("cron_job", {}), ensure_ascii=False)
         req.system_prompt += PROACTIVE_AGENT_CRON_WOKE_SYSTEM_PROMPT.format(
@@ -461,29 +1066,29 @@ class CronJobManager:
             req.func_tool.add_tool(
                 self.ctx.get_llm_tool_manager().get_builtin_tool(SendMessageToUserTool)
             )
-
         result = await build_main_agent(
-            event=cron_event, plugin_context=self.ctx, config=config, req=req
+            event=cron_event,
+            plugin_context=self.ctx,
+            config=config,
+            req=req,
         )
         if not result:
             logger.error("Failed to build main agent for cron job.")
             return
-
         runner = result.agent_runner
         async for _ in runner.step_until_done(30):
-            # agent will send message to user via using tools
             pass
         llm_resp = runner.get_final_llm_resp()
         cron_meta = extras.get("cron_job", {}) if extras else {}
         summary_note = (
-            f"[CronJob] {cron_meta.get('name') or cron_meta.get('id', 'unknown')}: {cron_meta.get('description', '')} "
-            f" triggered at {cron_meta.get('run_started_at', 'unknown time')}, "
+            f"[CronJob] {cron_meta.get('name') or cron_meta.get('id', 'unknown')}: "
+            f"{cron_meta.get('description', '')} triggered at "
+            f"{cron_meta.get('run_started_at', 'unknown time')}, "
         )
         if llm_resp and llm_resp.role == "assistant":
             summary_note += (
                 f"I finished this job, here is the result: {llm_resp.completion_text}"
             )
-
         await persist_agent_history(
             self.ctx.conversation_manager,
             event=cron_event,
@@ -492,7 +1097,34 @@ class CronJobManager:
         )
         if not llm_resp:
             logger.warning("Cron job agent got no response")
-            return
 
 
-__all__ = ["CronJobManager"]
+_CRON_JOB_COLUMNS = (
+    "id",
+    "job_id",
+    "name",
+    "description",
+    "job_type",
+    "cron_expression",
+    "timezone",
+    "payload",
+    "enabled",
+    "persistent",
+    "run_once",
+    "status",
+    "last_run_at",
+    "next_run_time",
+    "last_error",
+)
+
+
+__all__ = [
+    "CronJobAlreadyRunningError",
+    "CronJobManager",
+    "CronJobNotFoundError",
+    "CronJobSchedulingError",
+    "CronJobShuttingDownError",
+    "CronScriptDefinitionError",
+    "CronScriptNotAuthorizedError",
+    "CronScriptValidationError",
+]

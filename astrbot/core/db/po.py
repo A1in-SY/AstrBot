@@ -195,7 +195,9 @@ class CronJob(TimestampMixin, SQLModel, table=True):
     )
     name: str = Field(max_length=255, nullable=False)
     description: str | None = Field(default=None, sa_type=Text)
-    job_type: str = Field(max_length=32, nullable=False)  # basic | active_agent
+    job_type: str = Field(
+        max_length=32, nullable=False
+    )  # basic | active_agent | script
     cron_expression: str | None = Field(default=None, max_length=255)
     timezone: str | None = Field(default=None, max_length=64)
     payload: dict = Field(default_factory=dict, sa_type=JSON)
@@ -206,6 +208,58 @@ class CronJob(TimestampMixin, SQLModel, table=True):
     last_run_at: datetime | None = Field(default=None)
     next_run_time: datetime | None = Field(default=None)
     last_error: str | None = Field(default=None, sa_type=Text)
+
+
+class CronScriptTask(TimestampMixin, SQLModel, table=True):
+    """One-to-one script definition for a ``job_type='script'`` cron job.
+
+    The public scheduling fields live in ``cron_jobs``; this table only stores
+    the script definition, its source hash, the language version, the bound
+    UMO and the persistent state.  ``job_id`` is both the primary key and the
+    foreign key back to ``cron_jobs`` (ON DELETE CASCADE).
+    """
+
+    __tablename__: str = "cron_script_tasks"
+
+    job_id: str = Field(
+        primary_key=True,
+        max_length=64,
+        foreign_key="cron_jobs.job_id",
+        ondelete="CASCADE",
+    )
+    source: str = Field(sa_type=Text, nullable=False)
+    source_hash: str = Field(max_length=64, nullable=False)
+    language_version: str = Field(max_length=64, nullable=False)
+    bound_umo: str = Field(max_length=512, nullable=False)
+    creator_sender_id: str | None = Field(default=None, max_length=255)
+    state: dict = Field(default_factory=dict, sa_type=JSON, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_cron_script_tasks_bound_umo_creator",
+            "bound_umo",
+            "creator_sender_id",
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class CronScriptJob:
+    """Aggregate of a script cron job and its script definition."""
+
+    job: CronJob
+    script: CronScriptTask
+
+
+@dataclass(frozen=True)
+class CronScriptJobSummary:
+    """Lightweight script summary that never loads source or state."""
+
+    job: CronJob
+    source_hash: str
+    language_version: str
+    bound_umo: str
+    creator_sender_id: str | None
 
 
 class Preference(TimestampMixin, SQLModel, table=True):

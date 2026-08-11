@@ -78,7 +78,7 @@ from astrbot.core.tools.computer_tools import (
     RunBrowserSkillTool,
     SyncSkillReleaseTool,
 )
-from astrbot.core.tools.cron_tools import FutureTaskTool
+from astrbot.core.tools.cron_tools import FutureTaskTool, ScriptTaskTool
 from astrbot.core.tools.knowledge_base_tools import (
     KnowledgeBaseQueryTool,
     retrieve_knowledge_base,
@@ -1212,11 +1212,21 @@ def _apply_sandbox_tools(
     req.system_prompt = f"{req.system_prompt or ''}\n{SANDBOX_MODE_PROMPT}\n"
 
 
-def _proactive_cron_job_tools(req: ProviderRequest, plugin_context: Context) -> None:
+def _proactive_cron_job_tools(
+    req: ProviderRequest,
+    plugin_context: Context,
+    event: AstrMessageEvent,
+) -> None:
     if req.func_tool is None:
         req.func_tool = ToolSet()
     tool_mgr = plugin_context.get_llm_tool_manager()
     req.func_tool.add_tool(tool_mgr.get_builtin_tool(FutureTaskTool))
+    cfg = plugin_context.get_config()
+    script_cfg = cfg.get("script_task") or {}
+    if script_cfg.get("enabled") and event.unified_msg_origin in (
+        script_cfg.get("allowed_umos") or []
+    ):
+        req.func_tool.add_tool(tool_mgr.get_builtin_tool(ScriptTaskTool))
 
 
 async def _apply_web_search_tools(
@@ -1599,7 +1609,7 @@ async def build_main_agent(
     )
 
     if config.add_cron_tools:
-        _proactive_cron_job_tools(req, plugin_context)
+        _proactive_cron_job_tools(req, plugin_context, event)
 
     if event.platform_meta.support_proactive_message:
         if req.func_tool is None:

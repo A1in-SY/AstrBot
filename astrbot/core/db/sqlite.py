@@ -1,11 +1,12 @@
 import asyncio
+import datetime as _datetime_mod
 import json
 import threading
 import typing as T
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import CursorResult, Row, not_
+from sqlalchemy import CursorResult, Row, event, not_
 from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
@@ -20,6 +21,9 @@ from astrbot.core.db.po import (
     CommandConflict,
     ConversationV2,
     CronJob,
+    CronScriptJob,
+    CronScriptJobSummary,
+    CronScriptTask,
     Persona,
     PersonaFolder,
     PlatformMessageHistory,
@@ -41,7 +45,6 @@ from astrbot.core.db.po import (
 from astrbot.core.sentinels import NOT_GIVEN
 
 TxResult = T.TypeVar("TxResult")
-CRON_FIELD_NOT_SET = object()
 
 
 class SQLiteDatabase(BaseDatabase):
@@ -50,6 +53,20 @@ class SQLiteDatabase(BaseDatabase):
         self.DATABASE_URL = f"sqlite+aiosqlite:///{db_path}"
         self.inited = False
         super().__init__()
+        self._enable_foreign_keys()
+
+    def _enable_foreign_keys(self) -> None:
+        """Enable SQLite foreign keys on every new connection.
+
+        PRAGMA foreign_keys is per-connection; the pragma must be executed for
+        each connection, not only during initialization.
+        """
+
+        @event.listens_for(self.engine.sync_engine, "connect")
+        def _set_sqlite_foreign_keys(dbapi_connection, connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
 
     async def initialize(self) -> None:
         """Initialize the database by creating tables if they do not exist."""
@@ -2197,18 +2214,18 @@ class SQLiteDatabase(BaseDatabase):
         self,
         job_id: str,
         *,
-        name: str | None | object = CRON_FIELD_NOT_SET,
-        cron_expression: str | None | object = CRON_FIELD_NOT_SET,
-        timezone: str | None | object = CRON_FIELD_NOT_SET,
-        payload: dict | None | object = CRON_FIELD_NOT_SET,
-        description: str | None | object = CRON_FIELD_NOT_SET,
-        enabled: bool | None | object = CRON_FIELD_NOT_SET,
-        persistent: bool | None | object = CRON_FIELD_NOT_SET,
-        run_once: bool | None | object = CRON_FIELD_NOT_SET,
-        status: str | None | object = CRON_FIELD_NOT_SET,
-        next_run_time: datetime | None | object = CRON_FIELD_NOT_SET,
-        last_run_at: datetime | None | object = CRON_FIELD_NOT_SET,
-        last_error: str | None | object = CRON_FIELD_NOT_SET,
+        name: str | None | object = NOT_GIVEN,
+        cron_expression: str | None | object = NOT_GIVEN,
+        timezone: str | None | object = NOT_GIVEN,
+        payload: dict | None | object = NOT_GIVEN,
+        description: str | None | object = NOT_GIVEN,
+        enabled: bool | None | object = NOT_GIVEN,
+        persistent: bool | None | object = NOT_GIVEN,
+        run_once: bool | None | object = NOT_GIVEN,
+        status: str | None | object = NOT_GIVEN,
+        next_run_time: datetime | None | object = NOT_GIVEN,
+        last_run_at: datetime | None | object = NOT_GIVEN,
+        last_error: str | None | object = NOT_GIVEN,
     ) -> CronJob | None:
         async with self.get_db() as session:
             session: AsyncSession
@@ -2228,7 +2245,7 @@ class SQLiteDatabase(BaseDatabase):
                     "last_run_at": last_run_at,
                     "last_error": last_error,
                 }.items():
-                    if val is CRON_FIELD_NOT_SET:
+                    if val is NOT_GIVEN:
                         continue
                     updates[key] = val
 
@@ -2269,3 +2286,237 @@ class SQLiteDatabase(BaseDatabase):
             query = query.order_by(desc(CronJob.created_at))
             result = await session.execute(query)
             return list(result.scalars().all())
+
+    async def create_script_cron_job(
+        self,
+        *,
+        name: str,
+        cron_expression: str | None,
+        timezone: str | None,
+        payload: dict | None,
+        description: str | None,
+        enabled: bool,
+        run_once: bool,
+        job_id: str,
+        source: str,
+        source_hash: str,
+        language_version: str,
+        bound_umo: str,
+        creator_sender_id: str | None,
+    ) -> CronScriptJob:
+        async with self.get_db() as session:
+            session: AsyncSession
+            async with session.begin():
+                job = CronJob(
+                    name=name,
+                    job_type="script",
+                    cron_expression=cron_expression,
+                    timezone=timezone,
+                    payload=payload or {},
+                    description=description,
+                    enabled=enabled,
+                    persistent=True,
+                    run_once=run_once,
+                    status="scheduled",
+                    job_id=job_id,
+                )
+                session.add(job)
+                await session.flush()
+                script = CronScriptTask(
+                    job_id=job.job_id,
+                    source=source,
+                    source_hash=source_hash,
+                    language_version=language_version,
+                    bound_umo=bound_umo,
+                    creator_sender_id=creator_sender_id,
+                    state={},
+                )
+                session.add(script)
+                await session.flush()
+                await session.refresh(job)
+                await session.refresh(script)
+                return CronScriptJob(job=job, script=script)
+
+    async def update_script_cron_job(
+        self,
+        job_id: str,
+        *,
+        name: str | None | object = NOT_GIVEN,
+        cron_expression: str | None | object = NOT_GIVEN,
+        timezone: str | None | object = NOT_GIVEN,
+        payload: dict | None | object = NOT_GIVEN,
+        description: str | None | object = NOT_GIVEN,
+        enabled: bool | None | object = NOT_GIVEN,
+        run_once: bool | None | object = NOT_GIVEN,
+        status: str | None | object = NOT_GIVEN,
+        next_run_time: datetime | None | object = NOT_GIVEN,
+        last_run_at: datetime | None | object = NOT_GIVEN,
+        last_error: str | None | object = NOT_GIVEN,
+        source: str | None | object = NOT_GIVEN,
+        source_hash: str | None | object = NOT_GIVEN,
+        language_version: str | None | object = NOT_GIVEN,
+        bound_umo: str | None | object = NOT_GIVEN,
+    ) -> CronScriptJob | None:
+        async with self.get_db() as session:
+            session: AsyncSession
+            async with session.begin():
+                job_updates: dict = {}
+                for key, val in {
+                    "name": name,
+                    "cron_expression": cron_expression,
+                    "timezone": timezone,
+                    "payload": payload,
+                    "description": description,
+                    "enabled": enabled,
+                    "run_once": run_once,
+                    "status": status,
+                    "next_run_time": next_run_time,
+                    "last_run_at": last_run_at,
+                    "last_error": last_error,
+                }.items():
+                    if val is NOT_GIVEN:
+                        continue
+                    job_updates[key] = val
+                if job_updates:
+                    await session.execute(
+                        update(CronJob)
+                        .where(col(CronJob.job_id) == job_id)
+                        .values(**job_updates)
+                        .execution_options(synchronize_session="fetch")
+                    )
+                script_updates: dict = {}
+                for key, val in {
+                    "source": source,
+                    "source_hash": source_hash,
+                    "language_version": language_version,
+                    "bound_umo": bound_umo,
+                }.items():
+                    if val is NOT_GIVEN:
+                        continue
+                    script_updates[key] = val
+                if script_updates:
+                    script_updates["updated_at"] = _datetime_mod.datetime.now(
+                        _datetime_mod.timezone.utc
+                    )
+                    await session.execute(
+                        update(CronScriptTask)
+                        .where(col(CronScriptTask.job_id) == job_id)
+                        .values(**script_updates)
+                        .execution_options(synchronize_session="fetch")
+                    )
+                result = await session.execute(
+                    select(CronJob, CronScriptTask)
+                    .join(
+                        CronScriptTask,
+                        col(CronScriptTask.job_id) == col(CronJob.job_id),
+                    )
+                    .where(col(CronJob.job_id) == job_id)
+                )
+                row = result.first()
+                if row is None:
+                    return None
+                return CronScriptJob(job=row[0], script=row[1])
+
+    async def get_script_cron_job(self, job_id: str) -> CronScriptJob | None:
+        async with self.get_db() as session:
+            session: AsyncSession
+            result = await session.execute(
+                select(CronJob, CronScriptTask)
+                .join(
+                    CronScriptTask,
+                    col(CronScriptTask.job_id) == col(CronJob.job_id),
+                )
+                .where(col(CronJob.job_id) == job_id)
+            )
+            row = result.first()
+            if row is None:
+                return None
+            return CronScriptJob(job=row[0], script=row[1])
+
+    async def list_script_cron_job_summaries(
+        self,
+        job_type: str | None = None,
+    ) -> list[CronScriptJobSummary]:
+        async with self.get_db() as session:
+            session: AsyncSession
+            query = (
+                select(
+                    CronJob,
+                    CronScriptTask.source_hash,
+                    CronScriptTask.language_version,
+                    CronScriptTask.bound_umo,
+                    CronScriptTask.creator_sender_id,
+                )
+                .join(
+                    CronScriptTask,
+                    col(CronScriptTask.job_id) == col(CronJob.job_id),
+                )
+                .order_by(desc(CronJob.created_at))
+            )
+            if job_type:
+                query = query.where(col(CronJob.job_type) == job_type)
+            result = await session.execute(query)
+            rows = result.all()
+            return [
+                CronScriptJobSummary(
+                    job=row[0],
+                    source_hash=row[1],
+                    language_version=row[2],
+                    bound_umo=row[3],
+                    creator_sender_id=row[4],
+                )
+                for row in rows
+            ]
+
+    async def commit_script_cron_state(
+        self,
+        job_id: str,
+        state: dict,
+        *,
+        expected_source_hash: str,
+        expected_bound_umo: str,
+        expected_language_version: str,
+    ) -> bool:
+        async with self.get_db() as session:
+            session: AsyncSession
+            async with session.begin():
+                result = await session.execute(
+                    update(CronScriptTask)
+                    .where(
+                        col(CronScriptTask.job_id) == job_id,
+                        col(CronScriptTask.source_hash) == expected_source_hash,
+                        col(CronScriptTask.bound_umo) == expected_bound_umo,
+                        col(CronScriptTask.language_version)
+                        == expected_language_version,
+                    )
+                    .values(
+                        state=state,
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                    .execution_options(synchronize_session="fetch")
+                )
+                return bool(result.rowcount == 1)
+
+    async def reset_script_cron_state(self, job_id: str) -> bool:
+        async with self.get_db() as session:
+            session: AsyncSession
+            async with session.begin():
+                result = await session.execute(
+                    update(CronScriptTask)
+                    .where(col(CronScriptTask.job_id) == job_id)
+                    .values(state={}, updated_at=datetime.now(timezone.utc))
+                    .execution_options(synchronize_session="fetch")
+                )
+                return bool(result.rowcount == 1)
+
+    async def mark_running_cron_jobs_interrupted(self, error: str) -> int:
+        async with self.get_db() as session:
+            session: AsyncSession
+            async with session.begin():
+                result = await session.execute(
+                    update(CronJob)
+                    .where(col(CronJob.status) == "running")
+                    .values(status="failed", last_error=error)
+                    .execution_options(synchronize_session="fetch")
+                )
+                return int(result.rowcount)

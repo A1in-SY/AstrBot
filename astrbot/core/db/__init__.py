@@ -15,6 +15,8 @@ from astrbot.core.db.po import (
     CommandConflict,
     ConversationV2,
     CronJob,
+    CronScriptJob,
+    CronScriptJobSummary,
     Persona,
     PersonaFolder,
     PlatformMessageHistory,
@@ -720,18 +722,18 @@ class BaseDatabase(abc.ABC):
         self,
         job_id: str,
         *,
-        name: str | None = None,
-        cron_expression: str | None = None,
-        timezone: str | None = None,
-        payload: dict | None = None,
-        description: str | None = None,
-        enabled: bool | None = None,
-        persistent: bool | None = None,
-        run_once: bool | None = None,
-        status: str | None = None,
-        next_run_time: datetime.datetime | None = None,
-        last_run_at: datetime.datetime | None = None,
-        last_error: str | None = None,
+        name: str | None | object = NOT_GIVEN,
+        cron_expression: str | None | object = NOT_GIVEN,
+        timezone: str | None | object = NOT_GIVEN,
+        payload: dict | None | object = NOT_GIVEN,
+        description: str | None | object = NOT_GIVEN,
+        enabled: bool | None | object = NOT_GIVEN,
+        persistent: bool | None | object = NOT_GIVEN,
+        run_once: bool | None | object = NOT_GIVEN,
+        status: str | None | object = NOT_GIVEN,
+        next_run_time: datetime.datetime | None | object = NOT_GIVEN,
+        last_run_at: datetime.datetime | None | object = NOT_GIVEN,
+        last_error: str | None | object = NOT_GIVEN,
     ) -> CronJob | None:
         """Update fields of a cron job by job_id."""
         ...
@@ -749,6 +751,88 @@ class BaseDatabase(abc.ABC):
     @abc.abstractmethod
     async def list_cron_jobs(self, job_type: str | None = None) -> list[CronJob]:
         """List cron jobs, optionally filtered by job_type."""
+        ...
+
+    @abc.abstractmethod
+    async def create_script_cron_job(
+        self,
+        *,
+        name: str,
+        cron_expression: str | None,
+        timezone: str | None,
+        payload: dict | None,
+        description: str | None,
+        enabled: bool,
+        run_once: bool,
+        job_id: str,
+        source: str,
+        source_hash: str,
+        language_version: str,
+        bound_umo: str,
+        creator_sender_id: str | None,
+    ) -> CronScriptJob:
+        """Create a script cron job and its script definition atomically."""
+        ...
+
+    @abc.abstractmethod
+    async def update_script_cron_job(
+        self,
+        job_id: str,
+        *,
+        name: str | None | object = NOT_GIVEN,
+        cron_expression: str | None | object = NOT_GIVEN,
+        timezone: str | None | object = NOT_GIVEN,
+        payload: dict | None | object = NOT_GIVEN,
+        description: str | None | object = NOT_GIVEN,
+        enabled: bool | None | object = NOT_GIVEN,
+        run_once: bool | None | object = NOT_GIVEN,
+        status: str | None | object = NOT_GIVEN,
+        next_run_time: datetime.datetime | None | object = NOT_GIVEN,
+        last_run_at: datetime.datetime | None | object = NOT_GIVEN,
+        last_error: str | None | object = NOT_GIVEN,
+        source: str | None | object = NOT_GIVEN,
+        source_hash: str | None | object = NOT_GIVEN,
+        language_version: str | None | object = NOT_GIVEN,
+        bound_umo: str | None | object = NOT_GIVEN,
+    ) -> CronScriptJob | None:
+        """Update public and script definition fields atomically; state is never
+        written by this method."""
+        ...
+
+    @abc.abstractmethod
+    async def get_script_cron_job(self, job_id: str) -> CronScriptJob | None:
+        """Fetch a script cron job with its script definition in one snapshot."""
+        ...
+
+    @abc.abstractmethod
+    async def list_script_cron_job_summaries(
+        self,
+        job_type: str | None = None,
+    ) -> list[CronScriptJobSummary]:
+        """List script summaries without loading source or state."""
+        ...
+
+    @abc.abstractmethod
+    async def commit_script_cron_state(
+        self,
+        job_id: str,
+        state: dict,
+        *,
+        expected_source_hash: str,
+        expected_bound_umo: str,
+        expected_language_version: str,
+    ) -> bool:
+        """CAS-commit state; returns False if the definition changed meanwhile."""
+        ...
+
+    @abc.abstractmethod
+    async def reset_script_cron_state(self, job_id: str) -> bool:
+        """Reset state to {} for a script cron job."""
+        ...
+
+    @abc.abstractmethod
+    async def mark_running_cron_jobs_interrupted(self, error: str) -> int:
+        """Mark stale running jobs as failed after an unclean restart."""
         ...
 
     # ====

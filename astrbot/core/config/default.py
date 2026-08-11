@@ -253,6 +253,14 @@ DEFAULT_CONFIG = {
     "t2i_active_template": "base",
     "http_proxy": "",
     "no_proxy": ["localhost", "127.0.0.1", "::1", "10.*", "192.168.*"],
+    "script_task": {
+        "enabled": False,
+        "allowed_umos": [],
+        "execution_timeout_seconds": 30,
+        "max_source_bytes": 65536,
+        "max_ast_nodes": 10000,
+        "max_ast_depth": 100,
+    },
     "dashboard": {
         "enable": True,
         "username": "astrbot",
@@ -4337,6 +4345,41 @@ CONFIG_METADATA_3_SYSTEM = {
     "system_group": {
         "name": "系统配置",
         "metadata": {
+            "script_task": {
+                "description": "脚本定时任务",
+                "hint": "用受限 Python 脚本执行机械化的定时任务，不再经过 LLM。默认关闭；必须在 allowlist 中精确加入会话 UMO 才能从对话中创建和执行。",
+                "type": "object",
+                "items": {
+                    "script_task.enabled": {
+                        "description": "启用",
+                        "type": "bool",
+                        "hint": "关闭后对话中不提供脚本任务工具，且所有新执行被拒绝；Dashboard 管理不受影响。",
+                    },
+                    "script_task.allowed_umos": {
+                        "description": "允许的会话（UMO）",
+                        "type": "list",
+                        "items": {"type": "string"},
+                        "hint": "精确的 unified_msg_origin 列表；留空表示全部拒绝，不支持通配符。",
+                    },
+                    "script_task.execution_timeout_seconds": {
+                        "description": "单次执行硬超时（秒）",
+                        "type": "int",
+                        "hint": "超过该时间将杀死脚本 Worker 并判定失败。",
+                    },
+                    "script_task.max_source_bytes": {
+                        "description": "源码大小上限（字节）",
+                        "type": "int",
+                    },
+                    "script_task.max_ast_nodes": {
+                        "description": "AST 节点数上限",
+                        "type": "int",
+                    },
+                    "script_task.max_ast_depth": {
+                        "description": "AST 嵌套深度上限",
+                        "type": "int",
+                    },
+                },
+            },
             "system": {
                 "description": "系统配置",
                 "type": "object",
