@@ -409,7 +409,9 @@ def get_dashboard_dist_a1in_release(dist_dir: str | Path) -> str | None:
             release = release_file.read_text(encoding="utf-8").strip()
             return release or None
     except (OSError, UnicodeDecodeError) as exc:
-        logger.warning("Failed to read A1in WebUI release from %s: %s", release_file, exc)
+        logger.warning(
+            "Failed to read A1in WebUI release from %s: %s", release_file, exc
+        )
     return None
 
 

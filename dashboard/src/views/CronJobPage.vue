@@ -282,7 +282,7 @@
               </div>
 
               <div
-                v-if="jobType === 'active_agent'"
+                v-if="jobType !== 'script' || !scriptDetailLoading"
                 class="dashboard-form-grid dashboard-form-grid--single"
               >
                 <v-text-field
@@ -420,7 +420,11 @@
                   v-model="newJob.session"
                   :items="availableUmos"
                   :loading="loadingUmos"
-                  :label="tm('form.session')"
+                  :label="
+                    tm(
+                      jobType === 'script' ? 'editor.boundUmo' : 'form.session',
+                    )
+                  "
                   variant="outlined"
                   density="comfortable"
                   clearable
@@ -466,7 +470,7 @@
                 </v-autocomplete>
               </div>
               <div
-                v-else-if="jobType === 'script' && scriptDetailLoading"
+                v-if="jobType === 'script' && scriptDetailLoading"
                 class="script-detail-loading"
               >
                 <v-progress-circular indeterminate color="primary" />
@@ -482,11 +486,17 @@
                 {{ scriptDetailAuthorizationMessage }}
               </v-alert>
               <ScriptTaskEditor
-                v-if="jobType === 'script' && (!isEditing || scriptDetail)"
-                v-model="scriptPayload"
+                v-if="jobType === 'script' && !isEditing"
+                v-model="scriptDraft"
+                :languages="languageRegistry"
+                class="mt-3"
+              />
+              <ScriptTaskDetail
+                v-else-if="jobType === 'script' && scriptDetail"
                 :detail="scriptDetail"
                 :languages="languageRegistry"
-                class="mt-2"
+                :is-dark="isDark"
+                class="mt-3"
                 @state-reset="handleStateReset"
               />
             </v-card-text>
@@ -520,17 +530,19 @@ import { useModuleI18n } from "@/i18n/composables";
 import OutlinedActionListItem from "@/components/shared/OutlinedActionListItem.vue";
 import StyledMenu from "@/components/shared/StyledMenu.vue";
 import UmoDisplay from "@/components/shared/UmoDisplay.vue";
+import ScriptTaskDetail from "@/components/cron/ScriptTaskDetail.vue";
 import ScriptTaskEditor from "@/components/cron/ScriptTaskEditor.vue";
 import type {
   CronApiErrorEnvelope,
   CronJob,
   ScriptCronJobDetail,
   ScriptLanguageRegistry,
-  ScriptTaskForm,
-  ScriptTaskRequest,
+  ScriptSourceDraft,
+  ScriptTaskCreateRequest,
+  ScriptTaskUpdateRequest,
 } from "@/types/cron";
 import {
-  createEmptyScriptTaskForm,
+  createEmptyScriptSourceDraft,
   DEFAULT_SCRIPT_LANGUAGE_VERSION,
 } from "@/types/cron";
 
@@ -554,7 +566,7 @@ const creating = ref(false);
 const editingJobId = ref("");
 const runningJobIds = ref(new Set<string>());
 const jobType = ref<"active_agent" | "script">("active_agent");
-const scriptPayload = ref<ScriptTaskForm>(createEmptyScriptTaskForm());
+const scriptDraft = ref<ScriptSourceDraft>(createEmptyScriptSourceDraft());
 const scriptDetail = ref<ScriptCronJobDetail | null>(null);
 const languageRegistry = ref<ScriptLanguageRegistry | null>(null);
 const languageRegistryLoading = ref(false);
@@ -1061,7 +1073,7 @@ function openCreate() {
   scriptDetailRequestGeneration += 1;
   editingJobId.value = "";
   jobType.value = "active_agent";
-  scriptPayload.value = createEmptyScriptTaskForm();
+  scriptDraft.value = createEmptyScriptSourceDraft();
   scriptDetail.value = null;
   scriptDetailLoading.value = false;
   resetNewJob();
@@ -1110,10 +1122,12 @@ function openEdit(job: CronJob) {
   scriptDetailLoading.value = false;
   editingJobId.value = job.job_id;
   scriptDetail.value = null;
-  scriptPayload.value = createEmptyScriptTaskForm();
+  scriptDraft.value = createEmptyScriptSourceDraft();
+  resetNewJob();
   if (job.job_type === "script") {
     jobType.value = "script";
     createDialog.value = true;
+    loadUmos(true);
     loadLanguages();
     loadScriptDetail(job.job_id);
     return;
@@ -1171,18 +1185,28 @@ async function loadScriptDetail(jobId: string) {
     }
     scriptDetail.value = data;
     const script = data.script;
-    scriptPayload.value = {
+    const schedule = readScheduleFromJob(data);
+    const boundUmo = script.bound_umo || data.session || "";
+    if (boundUmo && !availableUmos.value.includes(boundUmo)) {
+      availableUmos.value = [boundUmo, ...availableUmos.value];
+      mergeUmoInfos([parseUmoInfo(boundUmo)]);
+    }
+    newJob.value = {
+      schedule_mode: schedule.schedule_mode,
       name: data.name || "",
       note: data.note || data.description || "",
-      bound_umo: script.bound_umo || data.session || "",
-      cron_expression: data.cron_expression || "",
-      run_once: Boolean(data.run_once),
-      run_at: data.run_at || "",
+      cron_expression: schedule.cron_expression,
+      run_at: toDatetimeLocalValue(data.run_at),
+      interval_value: schedule.interval_value,
+      interval_unit: schedule.interval_unit,
+      daily_time: schedule.daily_time,
+      weekly_day: schedule.weekly_day,
+      weekly_time: schedule.weekly_time,
+      monthly_day: schedule.monthly_day,
+      monthly_time: schedule.monthly_time,
+      session: boundUmo,
       timezone: data.timezone || "",
       enabled: data.enabled !== false,
-      source: script.source || "",
-      language_version:
-        script.language_version || DEFAULT_SCRIPT_LANGUAGE_VERSION,
     };
   } catch (error: unknown) {
     if (
@@ -1231,7 +1255,7 @@ function closeJobDialog() {
   createDialog.value = false;
   editingJobId.value = "";
   scriptDetail.value = null;
-  scriptPayload.value = createEmptyScriptTaskForm();
+  scriptDraft.value = createEmptyScriptSourceDraft();
   scriptDetailLoading.value = false;
 }
 
@@ -1434,7 +1458,7 @@ function buildPayload(): CronJobRequest {
   };
 }
 
-function normalizeScriptRunAt(value: string): string | null {
+function normalizeRunAt(value: string): string | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
   const date = new Date(trimmed);
@@ -1442,68 +1466,50 @@ function normalizeScriptRunAt(value: string): string | null {
   return date.toISOString();
 }
 
-function buildScriptPayload(): ScriptTaskRequest {
-  const payload = { ...scriptPayload.value };
-  const runAt = payload.run_once
-    ? normalizeScriptRunAt(payload.run_at) || ""
-    : "";
+function buildScriptUpdatePayload(): ScriptTaskUpdateRequest {
+  const runOnce = newJob.value.schedule_mode === "once";
   return {
-    job_type: "script",
-    name: String(payload.name || "script_task").trim(),
-    note: String(payload.note || "").trim(),
-    bound_umo: String(payload.bound_umo || "").trim(),
-    cron_expression: payload.run_once
-      ? ""
-      : String(payload.cron_expression || ""),
-    run_once: Boolean(payload.run_once),
-    run_at: runAt,
-    timezone: String(payload.timezone || ""),
-    enabled: payload.enabled !== false,
-    source: String(payload.source || ""),
-    language_version: String(
-      payload.language_version || DEFAULT_SCRIPT_LANGUAGE_VERSION,
-    ),
+    name: newJob.value.name.trim(),
+    note: newJob.value.note.trim(),
+    bound_umo: newJob.value.session.trim(),
+    cron_expression: runOnce ? "" : buildCronExpression(),
+    run_once: runOnce,
+    run_at: runOnce ? normalizeRunAt(newJob.value.run_at) || "" : "",
   };
 }
 
-function validateScriptForm(): boolean {
-  const payload = scriptPayload.value;
-  if (!String(payload.source || "").trim()) {
+function buildScriptCreatePayload(): ScriptTaskCreateRequest {
+  return {
+    ...buildScriptUpdatePayload(),
+    job_type: "script",
+    source: scriptDraft.value.source,
+    language_version:
+      scriptDraft.value.language_version || DEFAULT_SCRIPT_LANGUAGE_VERSION,
+  };
+}
+
+function validateScriptFields(): boolean {
+  if (!isEditing.value && !scriptDraft.value.source.trim()) {
     toast(tm("messages.scriptSourceRequired"), "warning");
     return false;
   }
-  if (!String(payload.bound_umo || "").trim()) {
+  if (!newJob.value.session.trim()) {
     toast(tm("messages.scriptUmoRequired"), "warning");
-    return false;
-  }
-  if (payload.run_once) {
-    if (!payload.run_at) {
-      toast(tm("messages.runAtRequired"), "warning");
-      return false;
-    }
-    if (!normalizeScriptRunAt(payload.run_at)) {
-      toast(tm("messages.runAtInvalid"), "warning");
-      return false;
-    }
-    return true;
-  }
-  if (!String(payload.cron_expression || "").trim()) {
-    toast(tm("messages.cronRequired"), "warning");
     return false;
   }
   return true;
 }
 
 function validateJobForm(): boolean {
-  if (jobType.value === "script") {
-    return validateScriptForm();
-  }
   if (!newJob.value.name.trim()) {
     toast(tm("messages.nameRequired"), "warning");
     return false;
   }
   if (!newJob.value.note.trim()) {
     toast(tm("messages.noteRequired"), "warning");
+    return false;
+  }
+  if (jobType.value === "script" && !validateScriptFields()) {
     return false;
   }
   return validateScheduleFields();
@@ -1514,6 +1520,10 @@ function validateScheduleFields(): boolean {
   if (mode === "once") {
     if (!newJob.value.run_at) {
       toast(tm("messages.runAtRequired"), "warning");
+      return false;
+    }
+    if (!normalizeRunAt(newJob.value.run_at)) {
+      toast(tm("messages.runAtInvalid"), "warning");
       return false;
     }
     return true;
@@ -1581,9 +1591,9 @@ async function createJob() {
 
   creating.value = true;
   try {
-    const payload: CronJobRequest =
-      jobType.value === "script" ? buildScriptPayload() : buildPayload();
-    const res = await cronApi.create(payload);
+    const payload =
+      jobType.value === "script" ? buildScriptCreatePayload() : buildPayload();
+    const res = await cronApi.create(payload as CronJobRequest);
     if (res.data.status === "ok") {
       toast(tm("messages.createSuccess"));
       createDialog.value = false;
@@ -1610,17 +1620,17 @@ async function updateJob() {
 
   creating.value = true;
   try {
-    const payload: CronJobRequest =
+    const payload =
       jobType.value === "script"
-        ? {
-            ...buildScriptPayload(),
-            description: String(scriptPayload.value.note || "").trim(),
-          }
+        ? buildScriptUpdatePayload()
         : {
             ...buildPayload(),
             description: newJob.value.note,
           };
-    const res = await cronApi.update(editingJobId.value, payload);
+    const res = await cronApi.update(
+      editingJobId.value,
+      payload as CronJobRequest,
+    );
     if (res.data.status === "ok") {
       toast(tm("messages.updateSuccess"));
       createDialog.value = false;

@@ -62,29 +62,22 @@ export interface ScriptCronJobDetail extends CronJob {
   script: ScriptJobDetail;
 }
 
-export interface ScriptTaskForm {
-  name: string;
-  note: string;
-  bound_umo: string;
-  cron_expression: string;
-  run_once: boolean;
-  run_at: string;
-  timezone: string;
-  enabled: boolean;
+export interface ScriptSourceDraft {
   source: string;
   language_version: string;
 }
 
-export interface ScriptTaskRequest extends CronJobRequest {
-  job_type: "script";
+export interface ScriptTaskUpdateRequest {
   name: string;
   note: string;
   bound_umo: string;
   cron_expression: string;
   run_once: boolean;
   run_at: string;
-  timezone: string;
-  enabled: boolean;
+}
+
+export interface ScriptTaskCreateRequest extends ScriptTaskUpdateRequest {
+  job_type: "script";
   source: string;
   language_version: string;
 }
@@ -105,16 +98,8 @@ export interface CronApiErrorEnvelope {
   data?: CronApiErrorData;
 }
 
-export function createEmptyScriptTaskForm(): ScriptTaskForm {
+export function createEmptyScriptSourceDraft(): ScriptSourceDraft {
   return {
-    name: "",
-    note: "",
-    bound_umo: "",
-    cron_expression: "",
-    run_once: false,
-    run_at: "",
-    timezone: "",
-    enabled: true,
     source: "",
     language_version: DEFAULT_SCRIPT_LANGUAGE_VERSION,
   };
