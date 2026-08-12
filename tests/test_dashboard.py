@@ -17,7 +17,7 @@ import pytest
 import pytest_asyncio
 from werkzeug.datastructures import FileStorage
 
-from astrbot.a1in_release import A1IN_UPSTREAM_BASE_TAG
+from astrbot.a1in_release import A1IN_RELEASE, A1IN_UPSTREAM_BASE_TAG
 from astrbot.core import LogBroker
 from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
 from astrbot.core.db.sqlite import SQLiteDatabase
@@ -1246,7 +1246,7 @@ async def test_version_endpoints_use_md5_password_hint(
 
     assert data["status"] == "ok"
     assert "md5_pwd_hint" in data["data"]
-    assert data["data"]["a1in_release"] == "a1in-v4.26.8.11"
+    assert data["data"]["a1in_release"] == A1IN_RELEASE
     assert data["data"]["a1in_upstream_base"] == A1IN_UPSTREAM_BASE_TAG
     assert _removed_md5_hint_alias_key() not in data["data"]
 
@@ -1258,7 +1258,7 @@ async def test_version_endpoints_use_md5_password_hint(
 
     assert data["status"] == "ok"
     assert "md5_pwd_hint" in data["data"]
-    assert data["data"]["a1in_release"] == "a1in-v4.26.8.11"
+    assert data["data"]["a1in_release"] == A1IN_RELEASE
     assert data["data"]["a1in_upstream_base"] == A1IN_UPSTREAM_BASE_TAG
     assert _removed_md5_hint_alias_key() not in data["data"]
 
@@ -1275,7 +1275,7 @@ async def test_public_versions_endpoint_does_not_require_auth(app: FastAPIAppAda
     assert data["data"]["astrbot_version"]
     assert "webui_version" in data["data"]
     assert "astrbot_code_version" in data["data"]
-    assert data["data"]["a1in_release"] == "a1in-v4.26.8.11"
+    assert data["data"]["a1in_release"] == A1IN_RELEASE
     assert data["data"]["a1in_upstream_base"] == A1IN_UPSTREAM_BASE_TAG
     assert "change_pwd_hint" not in data["data"]
     assert "md5_pwd_hint" not in data["data"]
