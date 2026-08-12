@@ -4,11 +4,12 @@ import asyncio
 import json
 import os
 import threading
+from pathlib import Path
 
 import pytest
 
 from astrbot.core.config.astrbot_config import AstrBotConfig, RateLimitStrategy
-from astrbot.core.config.default import DEFAULT_VALUE_MAP
+from astrbot.core.config.default import CONFIG_METADATA_3_SYSTEM, DEFAULT_VALUE_MAP
 from astrbot.core.config.i18n_utils import ConfigMetadataI18n
 from astrbot.core.utils.auth_password import (
     DEFAULT_DASHBOARD_PASSWORD,
@@ -1062,3 +1063,45 @@ class TestConfigMetadataI18n:
             result["group"]["metadata"]["section"]["items"]["field"]["name"]
             == "group.section.field.name"
         )
+
+    @pytest.mark.parametrize("locale", ["zh-CN", "en-US", "ru-RU"])
+    def test_system_metadata_i18n_keys_resolve_for_every_locale(self, locale):
+        """Every CONFIG_METADATA_3_SYSTEM key must resolve in each locale."""
+        converted = ConfigMetadataI18n.convert_to_i18n_keys(CONFIG_METADATA_3_SYSTEM)
+        keys: set[str] = set()
+
+        def collect(value):
+            if isinstance(value, dict):
+                for item in value.values():
+                    collect(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect(item)
+            elif isinstance(value, str) and value.startswith("system_group."):
+                keys.add(value)
+
+        collect(converted)
+        locale_path = (
+            Path(__file__).resolve().parents[2]
+            / "dashboard"
+            / "src"
+            / "i18n"
+            / "locales"
+            / locale
+            / "features"
+            / "config-metadata.json"
+        )
+        translations = json.loads(locale_path.read_text(encoding="utf-8"))
+        missing: list[str] = []
+        for key in sorted(keys):
+            value = translations
+            for part in key.split("."):
+                if not isinstance(value, dict) or part not in value:
+                    missing.append(key)
+                    break
+                value = value[part]
+            else:
+                if not isinstance(value, (str, list)):
+                    missing.append(key)
+
+        assert missing == []

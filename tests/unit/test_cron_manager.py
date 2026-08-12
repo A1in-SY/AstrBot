@@ -96,6 +96,17 @@ async def _add_script(mgr, *, bound_umo: str = "test:GroupMessage:g1", **kwargs)
     )
 
 
+async def _wait_for_job_status(db, job_id: str, statuses: set[str], timeout=3.0):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        job = await db.get_cron_job(job_id)
+        if job is None or job.status in statuses:
+            return job
+        if asyncio.get_running_loop().time() >= deadline:
+            return job
+        await asyncio.sleep(0.05)
+
+
 class TestInit:
     @pytest.mark.asyncio
     async def test_init(self, db):
@@ -223,8 +234,9 @@ class TestRunScript:
     async def test_run_now_sends_and_commits_state(self, manager, db, context):
         aggregate = await _add_script(manager)
         await manager.run_job_now(aggregate.job.job_id)
-        await asyncio.sleep(0.3)
-        job = await db.get_cron_job(aggregate.job.job_id)
+        job = await _wait_for_job_status(
+            db, aggregate.job.job_id, {"completed", "failed"}
+        )
         script = await db.get_script_cron_job(aggregate.job.job_id)
         assert job.status == "completed"
         assert script.script.state == {"last": "3899"}
@@ -297,6 +309,38 @@ class TestRunScript:
         await manager._run_job(aggregate.job.job_id)
         await asyncio.sleep(0.3)
         assert await db.get_cron_job(aggregate.job.job_id) is None
+
+    async def test_run_once_changed_to_recurring_during_run_is_not_deleted(
+        self, manager, db, context
+    ):
+        run_at = datetime.now(timezone.utc) + timedelta(days=1)
+        aggregate = await _add_script(
+            manager,
+            run_once=True,
+            run_at=run_at,
+            cron_expression=None,
+            source="await ctx.send_text('continue')\n",
+        )
+        job_id = aggregate.job.job_id
+        original = context.send_message
+
+        async def send_message(session, chain):
+            await manager.update_job(
+                job_id,
+                run_once=False,
+                cron_expression="*/5 * * * *",
+                payload={},
+            )
+            return await original(session, chain)
+
+        context.send_message = send_message
+        await manager._run_job(job_id)
+        await asyncio.sleep(0.3)
+
+        job = await db.get_cron_job(job_id)
+        assert job is not None
+        assert job.run_once is False
+        assert job.cron_expression == "*/5 * * * *"
 
     async def test_manual_run_now_does_not_delete_run_once(self, manager, db):
         run_at = datetime.now(timezone.utc) + timedelta(days=1)

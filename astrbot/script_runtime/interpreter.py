@@ -19,22 +19,23 @@ from astrbot.script_runtime.errors import (
     ScriptLanguageVersionError,
     ScriptProtocolError,
     ScriptRuntimeError,
+    is_script_catchable,
 )
 from astrbot.script_runtime.stdlib import Stdlib, unwrap, wrap
 from astrbot.script_runtime.values import SafeValue
 
 
-class ReturnSignal(Exception):
+class ReturnSignal(BaseException):
     def __init__(self, value: SafeValue) -> None:
         super().__init__()
         self.value = value
 
 
-class BreakSignal(Exception):
+class BreakSignal(BaseException):
     pass
 
 
-class ContinueSignal(Exception):
+class ContinueSignal(BaseException):
     pass
 
 
@@ -225,43 +226,53 @@ class Interpreter:
         raise ScriptRuntimeError(f"unsupported statement: {node_type}")
 
     async def _exec_try(self, node: ast.Try, scope: dict[str, SafeValue]) -> None:
-        error: BaseException | None = None
-        matched = False
         try:
-            try:
-                await self._exec_body(node.body, scope)
-            except tuple(ALL_CATCHABLE) as exc:
-                error = exc
-                matched = self._match_handler(node.handlers, exc)
-                if not matched:
-                    raise
-            else:
-                await self._exec_body(node.orelse, scope)
-        finally:
-            await self._exec_body(node.finalbody, scope)
-        if matched and error is not None:
-            handler = self._matching_handler(node.handlers, error)
+            await self._exec_try_body(node, scope)
+        except BaseException as exc:
             previous = self._current_exception
-            self._current_exception = error
+            # Return/break/continue are interpreter control signals, not Python
+            # exceptions visible to a bare ``raise`` inside ``finally``.  Keep
+            # an outer handled exception active when one exists, but only make
+            # a genuinely propagating exception the current exception here.
+            if isinstance(exc, Exception):
+                self._current_exception = exc
+            try:
+                await self._exec_body(node.finalbody, scope)
+            finally:
+                self._current_exception = previous
+            raise
+        else:
+            await self._exec_body(node.finalbody, scope)
+
+    async def _exec_try_body(self, node: ast.Try, scope: dict[str, SafeValue]) -> None:
+        try:
+            await self._exec_body(node.body, scope)
+        except Exception as exc:
+            if not is_script_catchable(exc):
+                raise
+            handler = self._matching_handler(node.handlers, exc)
+            if handler is None:
+                raise
+            previous = self._current_exception
+            self._current_exception = exc
             try:
                 handler_scope = scope
                 if handler.name:
                     handler_scope = dict(scope)
-                    handler_scope[handler.name] = SafeValue(spec.KIND_EXCEPTION, error)
+                    handler_scope[handler.name] = SafeValue(spec.KIND_EXCEPTION, exc)
                 await self._exec_body(handler.body, handler_scope)
             finally:
                 self._current_exception = previous
+        else:
+            await self._exec_body(node.orelse, scope)
 
-    def _matching_handler(self, handlers: list[ast.ExceptHandler], exc: BaseException):
+    def _matching_handler(
+        self, handlers: list[ast.ExceptHandler], exc: BaseException
+    ) -> ast.ExceptHandler | None:
         for handler in handlers:
             if self._handler_matches(handler, exc):
                 return handler
-        raise ScriptRuntimeError("no matching except handler")  # pragma: no cover
-
-    def _match_handler(
-        self, handlers: list[ast.ExceptHandler], exc: BaseException
-    ) -> bool:
-        return self._matching_handler(handlers, exc) is not None
+        return None
 
     def _handler_matches(self, handler: ast.ExceptHandler, exc: BaseException) -> bool:
         if handler.type is None:

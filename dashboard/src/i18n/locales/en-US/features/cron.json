@@ -42,6 +42,12 @@
     "customCron": "Custom · {cron}",
     "noDeliveryTarget": "No delivery target"
   },
+  "authorization": {
+    "tasksDisabled": "Script tasks are globally disabled, so this task will not run.",
+    "umoNotAllowed": "The bound session is not on the script-task allowlist, so this task will not run.",
+    "notAllowed": "This script task is not authorized to run.",
+    "alreadyRunning": "The task is already running."
+  },
   "filters": {
     "search": "Search title and content",
     "umo": "Filter by delivery target",
@@ -171,6 +177,10 @@
     "runFailed": "Failed to run",
     "scriptSourceRequired": "Script source is required",
     "scriptUmoRequired": "Bound session UMO is required",
+    "runAtInvalid": "Run time is invalid or incomplete",
+    "validationFailed": "Script validation request failed",
+    "languagesLoadFailed": "Failed to load script language versions",
+    "scriptDetailInvalid": "The server returned an invalid script task detail",
     "stateReset": "State reset",
     "stateResetFailed": "Failed to reset state"
   },
@@ -186,6 +196,7 @@
     "invalid": "{count} diagnostic(s)",
     "state": "Persistent state",
     "resetState": "Reset state",
-    "confirmResetState": "Reset the persistent state of this script task?"
+    "confirmResetState": "Reset the persistent state of this script task?",
+    "loadingDetail": "Loading script task details…"
   }
 }

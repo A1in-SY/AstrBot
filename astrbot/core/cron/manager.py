@@ -452,16 +452,19 @@ class CronJobManager:
 
     async def delete_job(self, job_id: str) -> None:
         async with self._mutation_lock:
-            job = await self.db.get_cron_job(job_id)
+            await self._delete_job_locked(job_id)
+
+    async def _delete_job_locked(self, job_id: str, job: CronJob | None = None) -> None:
+        job = job or await self.db.get_cron_job(job_id)
+        if job is not None:
+            self._remove_scheduled(job_id)
+            self._basic_handlers.pop(job_id, None)
+        try:
+            await self.db.delete_cron_job(job_id)
+        except Exception:
             if job is not None:
-                self._remove_scheduled(job_id)
-                self._basic_handlers.pop(job_id, None)
-            try:
-                await self.db.delete_cron_job(job_id)
-            except Exception:
-                if job is not None:
-                    await self._restore_schedule(job)
-                raise
+                await self._restore_schedule(job)
+            raise
 
     async def reset_script_cron_state(self, job_id: str) -> CronScriptJob:
         async with self._run_claim_lock:
@@ -739,8 +742,7 @@ class CronJobManager:
                     last_error=None,
                     next_run_time=next_run,
                 )
-                if job.run_once and delete_run_once:
-                    await self.delete_job(job_id)
+                await self._delete_if_still_run_once(job_id, delete_run_once)
         finally:
             async with self._run_claim_lock:
                 self._running_job_ids.discard(job_id)
@@ -760,9 +762,17 @@ class CronJobManager:
             last_error=error,
             next_run_time=next_run,
         )
-        job = await self.db.get_cron_job(job_id)
-        if job and job.run_once and delete_run_once:
-            await self.delete_job(job_id)
+        await self._delete_if_still_run_once(job_id, delete_run_once)
+
+    async def _delete_if_still_run_once(
+        self, job_id: str, delete_run_once: bool
+    ) -> None:
+        if not delete_run_once:
+            return
+        async with self._mutation_lock:
+            current = await self.db.get_cron_job(job_id)
+            if current and current.run_once:
+                await self._delete_job_locked(job_id, current)
 
     async def _run_script_job(
         self,
@@ -891,8 +901,7 @@ class CronJobManager:
                 last_error=result.message or result.error_code,
                 next_run_time=next_run,
             )
-        if job.run_once and delete_run_once:
-            await self.delete_job(job_id)
+        await self._delete_if_still_run_once(job_id, delete_run_once)
 
     # ------------------------------------------------------------------
     # Script configuration and authorization

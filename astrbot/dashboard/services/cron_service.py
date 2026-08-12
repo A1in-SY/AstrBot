@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import traceback
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -30,12 +29,19 @@ _MAPPED_ERROR_TYPES = (
 )
 
 
-@dataclass
 class CronServiceError(Exception):
-    message: str
-    status_code: int = 400
-    code: str = "CRON_ERROR"
-    data: Any = None
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 400,
+        code: str = "CRON_ERROR",
+        data: Any = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+        self.data = data
 
 
 def _wrap(exc: Exception, message: str) -> CronServiceError:
@@ -47,7 +53,7 @@ def _wrap(exc: Exception, message: str) -> CronServiceError:
         return CronServiceError(message, 403, "SCRIPT_TASK_NOT_AUTHORIZED")
     if isinstance(exc, CronScriptValidationError):
         return CronServiceError(
-            message,
+            str(exc),
             422,
             "SCRIPT_VALIDATION_FAILED",
             data={"validation": exc.validation.to_dict()},
@@ -221,6 +227,12 @@ class CronService:
         language_version = (
             payload.get("language_version") or spec.DEFAULT_LANGUAGE_VERSION
         )
+        if language_version not in spec.SUPPORTED_LANGUAGE_VERSIONS:
+            raise CronServiceError(
+                f"Unknown language version {language_version!r}",
+                422,
+                "SCRIPT_LANGUAGE_VERSION_UNKNOWN",
+            )
         if run_once and not run_at:
             raise CronServiceError(
                 "run_at is required when run_once=true", 422, "RUN_AT_REQUIRED"
@@ -506,6 +518,7 @@ class CronService:
             aggregate = await cron_mgr.reset_script_cron_state(job_id)
             item = self.serialize_job(aggregate.job)
             item["script"] = self._script_detail(aggregate)
+            item["script_summary"] = self._script_summary_for(aggregate)
             return item
         except CronServiceError:
             raise

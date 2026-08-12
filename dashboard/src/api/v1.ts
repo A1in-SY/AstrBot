@@ -57,6 +57,13 @@ import {
   type UpdateRequest,
 } from './generated/openapi-v1';
 import { apiV1Client, fetchWithAuth, httpClient } from './http';
+import type {
+  CronJob,
+  CronRunAccepted,
+  ScriptCronJobDetail,
+  ScriptLanguageRegistry,
+  ScriptValidationResult,
+} from '@/types/cron';
 
 openApiV1Client.setConfig({
   axios: httpClient,
@@ -1208,37 +1215,45 @@ export const sessionApi = {
 
 export const cronApi = {
   list(params?: CronJobListParams) {
-    return typed<any>(openApiV1.listCronJobs({ query: generatedQuery(params) }));
+    return typed<CronJob[]>(
+      openApiV1.listCronJobs({ query: generatedQuery(params) }),
+    );
   },
   get(jobId: string) {
-    return typed<any>(openApiV1.getCronJob({ path: { job_id: jobId } }));
+    return typed<CronJob | ScriptCronJobDetail>(
+      openApiV1.getCronJob({ path: { job_id: jobId } }),
+    );
   },
   create(payload: CronJobRequest) {
-    return typed<any>(openApiV1.createCronJob({ body: payload }));
+    return typed<CronJob>(openApiV1.createCronJob({ body: payload }));
   },
   update(jobId: string, payload: CronJobPatchRequest) {
-    return typed<any>(
+    return typed<CronJob>(
       openApiV1.updateCronJob({ path: { job_id: jobId }, body: payload }),
     );
   },
   delete(jobId: string) {
-    return typed<any>(openApiV1.deleteCronJob({ path: { job_id: jobId } }));
+    return typed<Record<string, never>>(
+      openApiV1.deleteCronJob({ path: { job_id: jobId } }),
+    );
   },
   run(jobId: string) {
-    return typed<any>(openApiV1.runCronJob({ path: { job_id: jobId } }));
+    return typed<CronRunAccepted>(
+      openApiV1.runCronJob({ path: { job_id: jobId } }),
+    );
   },
   validateScript(source: string, languageVersion: string) {
-    return typed<any>(
+    return typed<ScriptValidationResult>(
       openApiV1.validateCronScript({
         body: { source, language_version: languageVersion },
       }),
     );
   },
   scriptLanguages() {
-    return typed<any>(openApiV1.cronScriptLanguages());
+    return typed<ScriptLanguageRegistry>(openApiV1.cronScriptLanguages());
   },
   resetState(jobId: string) {
-    return typed<any>(
+    return typed<ScriptCronJobDetail>(
       openApiV1.resetCronScriptState({ path: { job_id: jobId } }),
     );
   },

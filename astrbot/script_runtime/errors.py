@@ -110,6 +110,14 @@ ALL_CATCHABLE = (
     StateNotJsonError,
 )
 
+
+def is_script_catchable(exc: BaseException) -> bool:
+    """Return whether an exception may be handled by script ``except`` blocks."""
+    return isinstance(exc, tuple(ALL_CATCHABLE)) and not isinstance(
+        exc, ScriptRuntimeError
+    )
+
+
 BUILTIN_EXCEPTIONS: dict[str, type[BaseException]] = {
     "Exception": Exception,
     "ArithmeticError": ArithmeticError,
@@ -135,6 +143,7 @@ __all__ = [
     "HttpProtocolError",
     "HttpProxyError",
     "HttpTimeoutError",
+    "is_script_catchable",
     "ScriptHostCancelled",
     "ScriptInterrupted",
     "ScriptLanguageVersionError",

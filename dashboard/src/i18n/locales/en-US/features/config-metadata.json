@@ -1049,6 +1049,33 @@
   },
   "system_group": {
     "name": "System",
+    "script_task": {
+      "description": "Scheduled Script Tasks",
+      "hint": "Run deterministic scheduled work with the restricted Python subset without using an LLM. Disabled by default; a session UMO must be explicitly allowlisted before scripts can be created or executed from a conversation.",
+      "script_task": {
+        "enabled": {
+          "description": "Enabled",
+          "hint": "When disabled, script-task tools are hidden from conversations and all new executions are rejected. Dashboard management remains available."
+        },
+        "allowed_umos": {
+          "description": "Allowed Sessions (UMO)",
+          "hint": "Exact unified_msg_origin values. An empty list denies all sessions; wildcards are not supported."
+        },
+        "execution_timeout_seconds": {
+          "description": "Hard Execution Timeout (seconds)",
+          "hint": "The script worker is terminated and the run fails after this duration."
+        },
+        "max_source_bytes": {
+          "description": "Maximum Source Size (bytes)"
+        },
+        "max_ast_nodes": {
+          "description": "Maximum AST Nodes"
+        },
+        "max_ast_depth": {
+          "description": "Maximum AST Depth"
+        }
+      }
+    },
     "system": {
       "description": "System Settings",
       "t2i_strategy": {

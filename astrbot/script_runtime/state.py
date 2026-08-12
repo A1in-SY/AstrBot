@@ -63,8 +63,11 @@ class AtomicState:
     leaves a partially applied change.
     """
 
-    def __init__(self, initial: dict[str, JSONValue] | None = None) -> None:
-        self._data: dict[str, JSONValue] = validate_json_value(initial or {})
+    def __init__(self, initial: Any | None = None) -> None:
+        validated = validate_json_value(initial if initial is not None else {})
+        if not isinstance(validated, dict):
+            raise StateNotJsonError("state: root value must be an object")
+        self._data: dict[str, JSONValue] = validated
 
     def snapshot(self) -> dict[str, JSONValue]:
         return copy.deepcopy(self._data)
@@ -72,8 +75,11 @@ class AtomicState:
     def get(self, key: str) -> JSONValue:
         return copy.deepcopy(self._data[key])
 
-    def commit(self, candidate: dict[str, JSONValue]) -> None:
-        self._data = validate_json_value(candidate)
+    def commit(self, candidate: Any) -> None:
+        validated = validate_json_value(candidate)
+        if not isinstance(validated, dict):
+            raise StateNotJsonError("state: root value must be an object")
+        self._data = validated
 
     def mutate(self, mutation) -> JSONValue:
         """Apply a mutation callable against a fresh deep copy, atomically."""

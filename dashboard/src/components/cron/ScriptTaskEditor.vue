@@ -43,7 +43,6 @@
           variant="outlined"
           density="comfortable"
           hide-details
-          :disabled="isEditing"
         />
       </v-col>
       <v-col cols="12" md="4">
@@ -90,11 +89,20 @@
           placeholder="Asia/Shanghai"
         />
       </v-col>
+      <v-col cols="12" md="6">
+        <v-switch
+          v-model="local.enabled"
+          :label="tm('form.enabled')"
+          density="compact"
+          hide-details
+          class="mt-1"
+        />
+      </v-col>
     </v-row>
 
     <div class="editor-shell mt-3">
       <VueMonacoEditor
-        v-model="sourceText"
+        v-model:value="sourceText"
         language="python"
         theme="vs-dark"
         :options="editorOptions"
@@ -118,9 +126,7 @@
           :color="validation.valid ? 'success' : 'error'"
           variant="tonal"
         >
-          {{
-            validation.valid ? tm("editor.valid") : invalidLabel
-          }}
+          {{ validation.valid ? tm("editor.valid") : invalidLabel }}
         </v-chip>
       </div>
       <div v-if="diagnostics.length" class="diagnostics-panel">
@@ -130,11 +136,7 @@
           class="diagnostic-row"
           @click="jumpToDiagnostic(diagnostic)"
         >
-          <v-icon
-            size="small"
-            color="error"
-            class="mr-1"
-          >
+          <v-icon size="small" color="error" class="mr-1">
             mdi-alert-circle-outline
           </v-icon>
           <span class="diagnostic-code">{{ diagnostic.code }}</span>
@@ -183,48 +185,63 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  reactive,
+  ref,
+  shallowRef,
+  watch,
+} from "vue";
 import VueMonacoEditor from "@guolao/vue-monaco-editor";
 import type { editor } from "monaco-editor";
-import { useI18n } from "vue-i18n";
 import { cronApi } from "@/api/v1";
+import { useModuleI18n } from "@/i18n/composables";
+import type {
+  CronApiErrorEnvelope,
+  ScriptCronJobDetail,
+  ScriptDiagnostic,
+  ScriptLanguageRegistry,
+  ScriptTaskForm,
+  ScriptValidationResult,
+} from "@/types/cron";
+import {
+  createEmptyScriptTaskForm,
+  DEFAULT_SCRIPT_LANGUAGE_VERSION,
+} from "@/types/cron";
+
+type MonacoApi = typeof import("monaco-editor");
 
 const props = defineProps<{
-  modelValue: Record<string, any>;
-  detail?: Record<string, any> | null;
-  languages?: Record<string, any> | null;
-  isEditing?: boolean;
+  modelValue: ScriptTaskForm;
+  detail?: ScriptCronJobDetail | null;
+  languages?: ScriptLanguageRegistry | null;
 }>();
 
 const emit = defineEmits<{
-  (e: "update:modelValue", value: Record<string, any>): void;
+  (e: "update:modelValue", value: ScriptTaskForm): void;
+  (e: "state-reset", value: ScriptCronJobDetail): void;
 }>();
 
-const { t, tm } = useI18n();
+const { tm } = useModuleI18n("features/cron");
 const snackbar = ref({ show: false, message: "", color: "success" });
 
-const local = reactive<Record<string, any>>({
-  name: "",
-  note: "",
-  bound_umo: "",
-  cron_expression: "",
-  run_once: false,
-  run_at: "",
-  timezone: "",
-  enabled: true,
-  source: "",
-  language_version: "astrbot-python-subset/v1",
-});
+const local = reactive<ScriptTaskForm>(createEmptyScriptTaskForm());
 
 const sourceText = ref("");
 const validating = ref(false);
-const validation = ref<Record<string, any> | null>(null);
-const diagnostics = ref<Record<string, any>[]>([]);
+const validation = ref<ScriptValidationResult | null>(null);
+const diagnostics = ref<ScriptDiagnostic[]>([]);
 const resetting = ref(false);
 const stateResettingDisabled = ref(false);
-const monacoEditor = ref<editor.IStandaloneCodeEditor | null>(null);
+const monacoEditor = shallowRef<editor.IStandaloneCodeEditor | null>(null);
+const monacoApi = shallowRef<MonacoApi | null>(null);
 const markerOwner = "astrbot-script-validator";
 let validateGeneration = 0;
+let propSyncGeneration = 0;
+let syncingFromProps = false;
+let lastEmittedValue: ScriptTaskForm | null = null;
 
 const editorOptions = {
   minimap: { enabled: false },
@@ -236,7 +253,9 @@ const editorOptions = {
 };
 
 const invalidLabel = computed(() =>
-  t("editor.invalid", { count: String(validation.value?.total_diagnostics ?? 0) }),
+  tm("editor.invalid", {
+    count: String(validation.value?.total_diagnostics ?? 0),
+  }),
 );
 
 function toast(message: string, color: "success" | "error" | "warning") {
@@ -248,7 +267,7 @@ const languageVersions = computed(() => {
   if (!registry?.versions?.length) {
     return [
       {
-        language_version: "astrbot-python-subset/v1",
+        language_version: DEFAULT_SCRIPT_LANGUAGE_VERSION,
         display_name: "astrbot-python-subset v1",
       },
     ];
@@ -257,26 +276,33 @@ const languageVersions = computed(() => {
 });
 
 function syncFromProps() {
-  const value = props.modelValue || {};
+  const generation = ++propSyncGeneration;
+  syncingFromProps = true;
+  const value = props.modelValue;
   Object.assign(local, {
     name: value.name ?? "",
     note: value.note ?? "",
-    bound_umo: value.bound_umo ?? value.session ?? "",
+    bound_umo: value.bound_umo ?? "",
     cron_expression: value.cron_expression ?? "",
     run_once: Boolean(value.run_once),
     run_at: toDatetimeLocalValue(value.run_at),
     timezone: value.timezone ?? "",
     enabled: value.enabled !== false,
     source: value.source ?? "",
-    language_version: value.language_version ?? "astrbot-python-subset/v1",
+    language_version: value.language_version || DEFAULT_SCRIPT_LANGUAGE_VERSION,
   });
   sourceText.value = local.source;
   validation.value = null;
   diagnostics.value = [];
   clearMarkers();
+  void nextTick(() => {
+    if (generation === propSyncGeneration) {
+      syncingFromProps = false;
+    }
+  });
 }
 
-function toDatetimeLocalValue(value: any): string {
+function toDatetimeLocalValue(value: string): string {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
@@ -286,50 +312,57 @@ function toDatetimeLocalValue(value: any): string {
 }
 
 function emitValue() {
-  emit("update:modelValue", {
+  if (syncingFromProps) return;
+  const value: ScriptTaskForm = {
     name: local.name,
     note: local.note,
     bound_umo: local.bound_umo,
-    cron_expression: local.run_once ? null : local.cron_expression,
+    cron_expression: local.cron_expression,
     run_once: local.run_once,
-    run_at: local.run_at ? new Date(local.run_at).toISOString() : "",
+    run_at: local.run_at,
     timezone: local.timezone,
     enabled: local.enabled,
     source: sourceText.value,
     language_version: local.language_version,
-  });
+  };
+  lastEmittedValue = value;
+  emit("update:modelValue", value);
 }
 
-function onEditorMount(editorInstance: editor.IStandaloneCodeEditor) {
+function onEditorMount(
+  editorInstance: editor.IStandaloneCodeEditor,
+  monaco: MonacoApi,
+) {
   monacoEditor.value = editorInstance;
+  monacoApi.value = monaco;
 }
 
 function clearMarkers() {
-  const monaco = (window as any).monaco;
-  if (!monaco) return;
-  monaco.editor.setModelMarkers(
-    monacoEditor.value?.getModel() ?? monaco.editor.getModels()[0],
-    markerOwner,
-    [],
-  );
+  const monaco = monacoApi.value;
+  const model = monacoEditor.value?.getModel();
+  if (!monaco || !model) return;
+  monaco.editor.setModelMarkers(model, markerOwner, []);
 }
 
 async function validateSource() {
   validating.value = true;
   const generation = ++validateGeneration;
   try {
-    const res: any = await cronApi.validateScript(
+    const res = await cronApi.validateScript(
       sourceText.value,
       local.language_version,
     );
     if (generation !== validateGeneration) return;
-    const data = res.data ?? res;
+    if (res.data.status !== "ok") {
+      throw new Error(res.data.message || tm("messages.validationFailed"));
+    }
+    const data = res.data.data;
     validation.value = data;
     diagnostics.value = (data.diagnostics ?? []).slice(0, 50);
     applyMarkers(data.diagnostics ?? []);
-  } catch (e: any) {
+  } catch (error: unknown) {
     if (generation !== validateGeneration) return;
-    toast(e?.response?.data?.message || "validation failed", "error");
+    toast(apiErrorMessage(error, tm("messages.validationFailed")), "error");
   } finally {
     if (generation === validateGeneration) {
       validating.value = false;
@@ -337,36 +370,38 @@ async function validateSource() {
   }
 }
 
-function applyMarkers(items: Record<string, any>[]) {
-  const monaco = (window as any).monaco;
-  const model = monacoEditor.value?.getModel() ?? monaco.editor?.getModels()[0];
+function applyMarkers(items: ScriptDiagnostic[]) {
+  const monaco = monacoApi.value;
+  const model = monacoEditor.value?.getModel();
   if (!monaco || !model) return;
-  const markers: any[] = [];
+  const markers: editor.IMarkerData[] = [];
   for (const item of items) {
     for (const occurrence of item.occurrences ?? []) {
       markers.push({
         severity: monaco.MarkerSeverity.Error,
-        message: item.message,
-        startLineNumber: occurrence.line,
-        startColumn: occurrence.column,
-        endLineNumber: occurrence.end_line ?? occurrence.line,
-        endColumn: occurrence.end_column ?? occurrence.column + 1,
+        message: item.message || item.code || "Script validation error",
+        startLineNumber: occurrence.line || 1,
+        startColumn: occurrence.column || 1,
+        endLineNumber: occurrence.end_line || occurrence.line || 1,
+        endColumn: occurrence.end_column || (occurrence.column || 1) + 1,
       });
     }
   }
   monaco.editor.setModelMarkers(model, markerOwner, markers);
 }
 
-function jumpToDiagnostic(diagnostic: Record<string, any>) {
+function jumpToDiagnostic(diagnostic: ScriptDiagnostic) {
   const first = diagnostic.occurrences?.[0];
   if (!first || !monacoEditor.value) return;
+  const lineNumber = first.line || 1;
+  const column = first.column || 1;
   monacoEditor.value.revealPositionInCenter({
-    lineNumber: first.line,
-    column: first.column,
+    lineNumber,
+    column,
   });
   monacoEditor.value.setPosition({
-    lineNumber: first.line,
-    column: first.column,
+    lineNumber,
+    column,
   });
   monacoEditor.value.focus();
 }
@@ -377,14 +412,14 @@ async function confirmResetState() {
   resetting.value = true;
   stateResettingDisabled.value = true;
   try {
-    const res: any = await cronApi.resetState(props.detail.job_id);
-    const data = res.data ?? res;
-    if (data?.script) {
-      props.detail!.script = data.script;
+    const res = await cronApi.resetState(props.detail.job_id);
+    if (res.data.status !== "ok") {
+      throw new Error(res.data.message || tm("messages.stateResetFailed"));
     }
+    emit("state-reset", res.data.data);
     toast(tm("messages.stateReset"), "success");
-  } catch (e: any) {
-    toast(e?.response?.data?.message || tm("messages.stateResetFailed"), "error");
+  } catch (error: unknown) {
+    toast(apiErrorMessage(error, tm("messages.stateResetFailed")), "error");
   } finally {
     resetting.value = false;
     stateResettingDisabled.value = false;
@@ -402,24 +437,78 @@ const stateText = computed(() => {
 });
 
 watch(
-  () => [props.modelValue, props.detail],
-  () => syncFromProps(),
+  () => props.modelValue,
+  (value) => {
+    if (lastEmittedValue && sameFormValue(value, lastEmittedValue)) {
+      lastEmittedValue = null;
+      return;
+    }
+    lastEmittedValue = null;
+    syncFromProps();
+  },
   { deep: true, immediate: true },
+);
+
+watch(
+  () => [
+    local.name,
+    local.note,
+    local.bound_umo,
+    local.cron_expression,
+    local.run_once,
+    local.run_at,
+    local.timezone,
+    local.enabled,
+    sourceText.value,
+    local.language_version,
+  ],
+  emitValue,
 );
 
 watch(
   () => [sourceText.value, local.language_version],
   () => {
+    if (syncingFromProps) return;
+    validateGeneration += 1;
+    validating.value = false;
     validation.value = null;
     diagnostics.value = [];
     clearMarkers();
-    emitValue();
   },
 );
 
-onMounted(() => {
-  syncFromProps();
+onBeforeUnmount(() => {
+  validateGeneration += 1;
+  clearMarkers();
+  monacoEditor.value = null;
+  monacoApi.value = null;
 });
+
+function sameFormValue(left: ScriptTaskForm, right: ScriptTaskForm): boolean {
+  return (
+    left.name === right.name &&
+    left.note === right.note &&
+    left.bound_umo === right.bound_umo &&
+    left.cron_expression === right.cron_expression &&
+    left.run_once === right.run_once &&
+    left.run_at === right.run_at &&
+    left.timezone === right.timezone &&
+    left.enabled === right.enabled &&
+    left.source === right.source &&
+    left.language_version === right.language_version
+  );
+}
+
+function apiErrorMessage(error: unknown, fallback: string): string {
+  const responseData = (error as { response?: { data?: CronApiErrorEnvelope } })
+    .response?.data;
+  const message =
+    responseData?.message ||
+    (error instanceof Error ? error.message : "") ||
+    fallback;
+  const code = responseData?.data?.code;
+  return code ? `${message} (${code})` : message;
+}
 </script>
 
 <style scoped>

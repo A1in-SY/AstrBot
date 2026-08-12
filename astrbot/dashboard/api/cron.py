@@ -34,10 +34,16 @@ def _payload_dict(payload: CronJobRequest) -> dict:
 
 
 def _raise_cron_error(exc: CronServiceError) -> None:
+    data: dict = {}
+    if isinstance(exc.data, dict):
+        data.update(exc.data)
+    elif exc.data is not None:
+        data["details"] = exc.data
+    data["code"] = exc.code
     raise ApiError(
-        str(exc),
+        exc.message,
         status_code=exc.status_code,
-        data=exc.data,
+        data=data,
     ) from exc
 
 

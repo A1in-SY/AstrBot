@@ -10,6 +10,8 @@ import pytest_asyncio
 
 from astrbot.core.cron.manager import CronJobManager
 from astrbot.core.db.sqlite import SQLiteDatabase
+from astrbot.dashboard.api.cron import _raise_cron_error
+from astrbot.dashboard.responses import ApiError
 from astrbot.dashboard.services.cron_service import CronService, CronServiceError
 
 pytestmark = pytest.mark.asyncio
@@ -94,8 +96,12 @@ async def test_create_script_and_run(service):
     job_id = created["job_id"]
     assert created["job_type"] == "script"
     await svc.run_job_now(job_id)
-    await asyncio.sleep(0.3)
     detail = await svc.get_job(job_id)
+    for _ in range(60):
+        if detail["status"] in {"completed", "failed"}:
+            break
+        await asyncio.sleep(0.05)
+        detail = await svc.get_job(job_id)
     assert detail["status"] == "completed"
     assert detail["script"]["state"] == {"last": "3888"}
 
@@ -114,6 +120,40 @@ async def test_create_script_invalid_returns_422_validation(service):
     assert excinfo.value.status_code == 422
     assert excinfo.value.code == "SCRIPT_VALIDATION_FAILED"
     assert excinfo.value.data["validation"]["valid"] is False
+
+
+async def test_cron_service_error_string_is_only_message():
+    error = CronServiceError(
+        "plain message",
+        422,
+        "STABLE_CODE",
+        data={"validation": {"valid": False}},
+    )
+    assert str(error) == "plain message"
+    assert repr(str(error)) == "'plain message'"
+
+
+async def test_api_error_includes_code_and_preserves_details():
+    service_error = CronServiceError(
+        "script source failed static validation",
+        422,
+        "SCRIPT_VALIDATION_FAILED",
+        data={"validation": {"valid": False}},
+    )
+    with pytest.raises(ApiError) as excinfo:
+        _raise_cron_error(service_error)
+    assert excinfo.value.message == "script source failed static validation"
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.data == {
+        "code": "SCRIPT_VALIDATION_FAILED",
+        "validation": {"valid": False},
+    }
+
+
+async def test_api_error_without_details_still_includes_code():
+    with pytest.raises(ApiError) as excinfo:
+        _raise_cron_error(CronServiceError("conflict", 409, "JOB_ALREADY_RUNNING"))
+    assert excinfo.value.data == {"code": "JOB_ALREADY_RUNNING"}
 
 
 async def test_create_script_requires_bound_umo(service):
@@ -144,6 +184,33 @@ async def test_update_script_migration(service):
     assert updated["name"] == "gold2"
 
 
+@pytest.mark.parametrize("entrypoint", ["create", "update", "validate"])
+async def test_unknown_language_version_returns_stable_422(service, entrypoint):
+    svc, *_ = service
+    payload = {
+        "job_type": "script",
+        "bound_umo": "test:GroupMessage:g1",
+        "cron_expression": "*/5 * * * *",
+        "source": "x = 1",
+        "language_version": "astrbot-python-subset/v999",
+    }
+    with pytest.raises(CronServiceError) as excinfo:
+        if entrypoint == "create":
+            await svc.create_job(payload)
+        elif entrypoint == "update":
+            created = await svc.create_job(
+                {**payload, "language_version": "astrbot-python-subset/v1"}
+            )
+            await svc.update_job(
+                created["job_id"],
+                {"language_version": "astrbot-python-subset/v999"},
+            )
+        else:
+            await svc.validate_script("x = 1", "astrbot-python-subset/v999")
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.code == "SCRIPT_LANGUAGE_VERSION_UNKNOWN"
+
+
 async def test_reset_state_endpoint(service):
     svc, _, _, _ = service
     created = await svc.create_job(
@@ -157,6 +224,8 @@ async def test_reset_state_endpoint(service):
     job_id = created["job_id"]
     detail = await svc.reset_script_state(job_id)
     assert detail["script"]["state"] == {}
+    assert detail["script_summary"]["bound_umo"] == "test:GroupMessage:g1"
+    assert detail["script_summary"]["execution_authorization"]["allowed"] is True
 
 
 async def test_run_now_conflict_409(service):

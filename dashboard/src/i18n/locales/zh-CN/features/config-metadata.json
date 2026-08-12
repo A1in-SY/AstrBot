@@ -1051,6 +1051,33 @@
   },
   "system_group": {
     "name": "系统配置",
+    "script_task": {
+      "description": "脚本定时任务",
+      "hint": "用受限 Python 脚本执行机械化的定时任务，不再经过 LLM。默认关闭；必须在 allowlist 中精确加入会话 UMO 才能从对话中创建和执行。",
+      "script_task": {
+        "enabled": {
+          "description": "启用",
+          "hint": "关闭后对话中不提供脚本任务工具，且所有新执行被拒绝；Dashboard 管理不受影响。"
+        },
+        "allowed_umos": {
+          "description": "允许的会话（UMO）",
+          "hint": "精确的 unified_msg_origin 列表；留空表示全部拒绝，不支持通配符。"
+        },
+        "execution_timeout_seconds": {
+          "description": "单次执行硬超时（秒）",
+          "hint": "超过该时间将杀死脚本 Worker 并判定失败。"
+        },
+        "max_source_bytes": {
+          "description": "源码大小上限（字节）"
+        },
+        "max_ast_nodes": {
+          "description": "AST 节点数上限"
+        },
+        "max_ast_depth": {
+          "description": "AST 嵌套深度上限"
+        }
+      }
+    },
     "system": {
       "description": "系统配置",
       "t2i_strategy": {

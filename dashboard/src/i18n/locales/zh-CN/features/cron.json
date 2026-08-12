@@ -42,6 +42,12 @@
     "customCron": "自定义 · {cron}",
     "noDeliveryTarget": "未设置投递地"
   },
+  "authorization": {
+    "tasksDisabled": "脚本任务全局开关已关闭，当前任务不会执行。",
+    "umoNotAllowed": "绑定会话不在脚本任务白名单中，当前任务不会执行。",
+    "notAllowed": "当前脚本任务未获执行授权。",
+    "alreadyRunning": "任务正在执行中。"
+  },
   "filters": {
     "search": "搜索任务名称和内容",
     "umo": "按投递地筛选",
@@ -162,7 +168,8 @@
     "invalid": "{count} 个诊断",
     "state": "持久化状态",
     "resetState": "重置状态",
-    "confirmResetState": "确认重置脚本任务的持久化状态？"
+    "confirmResetState": "确认重置脚本任务的持久化状态？",
+    "loadingDetail": "正在加载脚本任务详情…"
   },
   "messages": {
     "loadFailed": "获取任务失败",
@@ -185,6 +192,10 @@
     "runFailed": "执行失败",
     "scriptSourceRequired": "请填写脚本源码",
     "scriptUmoRequired": "请填写绑定会话 UMO",
+    "runAtInvalid": "执行时间无效或尚未填写完整",
+    "validationFailed": "脚本校验请求失败",
+    "languagesLoadFailed": "获取脚本语言版本失败",
+    "scriptDetailInvalid": "服务端返回的脚本任务详情无效",
     "stateReset": "状态已重置",
     "stateResetFailed": "状态重置失败"
   }

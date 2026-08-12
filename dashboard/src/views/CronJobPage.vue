@@ -117,6 +117,16 @@
                   {{ taskPreview(item) }}
                 </div>
 
+                <div
+                  v-if="scriptAuthorizationMessage(item)"
+                  class="task-authorization-warning text-caption"
+                >
+                  <v-icon size="small" class="me-1">
+                    mdi-alert-circle-outline
+                  </v-icon>
+                  {{ scriptAuthorizationMessage(item) }}
+                </div>
+
                 <div class="task-meta text-caption text-medium-emphasis">
                   <span class="task-meta-item">
                     <v-icon size="small" class="me-1">mdi-send-outline</v-icon>
@@ -159,12 +169,15 @@
                     <v-list-item
                       class="styled-menu-item"
                       prepend-icon="mdi-play-circle-outline"
-                      :disabled="runningJobIds.has(item.job_id)"
+                      :disabled="!canRunJobNow(item)"
                       @click.stop="runJobNow(item)"
                     >
                       <v-list-item-title>
                         {{ tm("actions.runNow") }}
                       </v-list-item-title>
+                      <v-list-item-subtitle v-if="runJobDisabledReason(item)">
+                        {{ runJobDisabledReason(item) }}
+                      </v-list-item-subtitle>
                     </v-list-item>
                     <v-list-item
                       class="styled-menu-item"
@@ -241,12 +254,10 @@
               dialogTitle
             }}</v-card-title>
             <v-card-text class="px-5 pb-2">
-              <div
-                v-if="!isEditing"
-                class="job-type-selector mb-3"
-              >
+              <div v-if="!isEditing" class="job-type-selector mb-3">
                 <v-btn-toggle
                   v-model="jobType"
+                  mandatory
                   density="comfortable"
                   variant="tonal"
                   color="primary"
@@ -454,23 +465,40 @@
                   </template>
                 </v-autocomplete>
               </div>
+              <div
+                v-else-if="jobType === 'script' && scriptDetailLoading"
+                class="script-detail-loading"
+              >
+                <v-progress-circular indeterminate color="primary" />
+                <span>{{ tm("editor.loadingDetail") }}</span>
+              </div>
+              <v-alert
+                v-if="jobType === 'script' && scriptDetailAuthorizationMessage"
+                type="warning"
+                variant="tonal"
+                density="compact"
+                class="mb-3"
+              >
+                {{ scriptDetailAuthorizationMessage }}
+              </v-alert>
               <ScriptTaskEditor
-                v-else
+                v-if="jobType === 'script' && (!isEditing || scriptDetail)"
                 v-model="scriptPayload"
                 :detail="scriptDetail"
                 :languages="languageRegistry"
-                :is-editing="isEditing"
                 class="mt-2"
+                @state-reset="handleStateReset"
               />
             </v-card-text>
             <v-card-actions class="justify-end px-5 pb-5">
-              <v-btn variant="text" @click="createDialog = false">{{
+              <v-btn variant="text" @click="closeJobDialog">{{
                 tm("actions.cancel")
               }}</v-btn>
               <v-btn
                 variant="tonal"
                 color="primary"
                 :loading="creating"
+                :disabled="submitDisabled"
                 @click="submitJob"
               >
                 {{ dialogSubmitText }}
@@ -484,21 +512,34 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useTheme } from "vuetify";
+import type { CronJobRequest } from "@/api/generated/openapi-v1";
 import { botApi, cronApi, sessionApi } from "@/api/v1";
 import { useModuleI18n } from "@/i18n/composables";
 import OutlinedActionListItem from "@/components/shared/OutlinedActionListItem.vue";
 import StyledMenu from "@/components/shared/StyledMenu.vue";
 import UmoDisplay from "@/components/shared/UmoDisplay.vue";
 import ScriptTaskEditor from "@/components/cron/ScriptTaskEditor.vue";
+import type {
+  CronApiErrorEnvelope,
+  CronJob,
+  ScriptCronJobDetail,
+  ScriptLanguageRegistry,
+  ScriptTaskForm,
+  ScriptTaskRequest,
+} from "@/types/cron";
+import {
+  createEmptyScriptTaskForm,
+  DEFAULT_SCRIPT_LANGUAGE_VERSION,
+} from "@/types/cron";
 
 const { tm } = useModuleI18n("features/cron");
 const theme = useTheme();
 
 const isDark = computed(() => theme.global.current.value.dark);
 const loading = ref(false);
-const jobs = ref<any[]>([]);
+const jobs = ref<CronJob[]>([]);
 const taskSearch = ref("");
 const selectedUmoFilter = ref<string | null>(null);
 const proactivePlatforms = ref<
@@ -513,10 +554,12 @@ const creating = ref(false);
 const editingJobId = ref("");
 const runningJobIds = ref(new Set<string>());
 const jobType = ref<"active_agent" | "script">("active_agent");
-const scriptPayload = ref<Record<string, any>>({});
-const scriptDetail = ref<Record<string, any> | null>(null);
-const languageRegistry = ref<Record<string, any> | null>(null);
+const scriptPayload = ref<ScriptTaskForm>(createEmptyScriptTaskForm());
+const scriptDetail = ref<ScriptCronJobDetail | null>(null);
+const languageRegistry = ref<ScriptLanguageRegistry | null>(null);
+const languageRegistryLoading = ref(false);
 const scriptDetailLoading = ref(false);
+let scriptDetailRequestGeneration = 0;
 const NO_DELIVERY_TARGET_FILTER = "__astrbot_no_delivery_target__";
 type ScheduleMode =
   | "once"
@@ -618,6 +661,16 @@ const dialogTitle = computed(() =>
 const dialogSubmitText = computed(() =>
   tm(isEditing.value ? "actions.save" : "actions.submit"),
 );
+const submitDisabled = computed(
+  () =>
+    creating.value ||
+    (jobType.value === "script" &&
+      isEditing.value &&
+      (scriptDetailLoading.value || !scriptDetail.value)),
+);
+const scriptDetailAuthorizationMessage = computed(() =>
+  scriptDetail.value ? scriptAuthorizationMessage(scriptDetail.value) : "",
+);
 const scheduleModeOptions = computed(() => [
   { label: tm("form.scheduleModes.once"), value: "once" },
   { label: tm("form.scheduleModes.interval"), value: "interval" },
@@ -648,14 +701,26 @@ function toast(
   snackbar.value = { show: true, message, color };
 }
 
-function parseTimeValue(value: any): number {
-  if (!value) return 0;
+function parseTimeValue(value: unknown): number {
+  if (
+    typeof value !== "string" &&
+    typeof value !== "number" &&
+    !(value instanceof Date)
+  ) {
+    return 0;
+  }
   const ts = new Date(value).getTime();
   return Number.isNaN(ts) ? 0 : ts;
 }
 
-function formatTime(val: any, fallback = tm("table.notAvailable")): string {
-  if (!val) return fallback;
+function formatTime(val: unknown, fallback = tm("table.notAvailable")): string {
+  if (
+    typeof val !== "string" &&
+    typeof val !== "number" &&
+    !(val instanceof Date)
+  ) {
+    return fallback;
+  }
   try {
     const date = new Date(val);
     return Number.isNaN(date.getTime()) ? fallback : date.toLocaleString();
@@ -664,21 +729,50 @@ function formatTime(val: any, fallback = tm("table.notAvailable")): string {
   }
 }
 
-function taskPreview(item: any): string {
+function taskPreview(item: CronJob): string {
   const text = String(item.note || item.description || "").trim();
   if (!text) return item.job_id || tm("table.notAvailable");
   return text.length > 86 ? `${text.slice(0, 86)}...` : text;
 }
 
-function getJobSession(job: any): string {
-  return String(job.session || job?.payload?.session || "").trim();
+function getJobSession(job: CronJob): string {
+  if (job.job_type === "script") {
+    return String(job.script_summary?.bound_umo || "").trim();
+  }
+  return String(job.session || job.payload?.session || "").trim();
 }
 
-function deliveryTargetText(item: any): string {
+function deliveryTargetText(item: CronJob): string {
   return getJobSession(item) || tm("card.noDeliveryTarget");
 }
 
-function nextRunText(item: any): string {
+function scriptAuthorizationMessage(item: CronJob): string {
+  if (item.job_type !== "script") return "";
+  const authorization = item.script_summary?.execution_authorization;
+  if (!authorization || authorization.allowed) return "";
+  if (authorization.reason === "SCRIPT_TASKS_DISABLED") {
+    return tm("authorization.tasksDisabled");
+  }
+  if (authorization.reason === "BOUND_UMO_NOT_ALLOWED") {
+    return tm("authorization.umoNotAllowed");
+  }
+  return tm("authorization.notAllowed");
+}
+
+function canRunJobNow(item: CronJob): boolean {
+  return (
+    !runningJobIds.value.has(item.job_id) && !scriptAuthorizationMessage(item)
+  );
+}
+
+function runJobDisabledReason(item: CronJob): string {
+  if (runningJobIds.value.has(item.job_id)) {
+    return tm("authorization.alreadyRunning");
+  }
+  return scriptAuthorizationMessage(item);
+}
+
+function nextRunText(item: CronJob): string {
   if (item.run_once) {
     return tm("card.runAt", { time: formatTime(item.run_at) });
   }
@@ -687,7 +781,7 @@ function nextRunText(item: any): string {
   });
 }
 
-function lastRunTooltipText(item: any): string {
+function lastRunTooltipText(item: CronJob): string {
   const lastRun = `${tm("table.headers.lastRun")}: ${formatTime(
     item.last_run_at,
   )}`;
@@ -698,7 +792,7 @@ function lastRunTooltipText(item: any): string {
   return `${lastRun} · ${lastError}`;
 }
 
-function scheduleProductLabel(item: any): string {
+function scheduleProductLabel(item: CronJob): string {
   if (item.run_once) {
     return tm("card.onceAt", { time: formatTime(item.run_at) });
   }
@@ -879,9 +973,9 @@ async function loadJobs() {
     const res = await cronApi.list();
     if (res.data.status === "ok") {
       const data = Array.isArray(res.data.data) ? res.data.data : [];
-      jobs.value = data.map((job: any) => ({
+      jobs.value = data.map((job) => ({
         ...job,
-        session: job?.payload?.session || job?.session || "",
+        session: getJobSession(job),
       }));
       mergeUmoInfos(
         jobs.value.map(getJobSession).filter(Boolean).map(parseUmoInfo),
@@ -889,8 +983,8 @@ async function loadJobs() {
     } else {
       toast(res.data.message || tm("messages.loadFailed"), "error");
     }
-  } catch (e: any) {
-    toast(e?.response?.data?.message || tm("messages.loadFailed"), "error");
+  } catch (error: unknown) {
+    toast(apiErrorMessage(error, tm("messages.loadFailed")), "error");
   } finally {
     loading.value = false;
   }
@@ -913,7 +1007,7 @@ async function loadPlatforms() {
   }
 }
 
-async function toggleJob(job: any) {
+async function toggleJob(job: CronJob) {
   try {
     const res = await cronApi.update(job.job_id, {
       enabled: job.enabled,
@@ -922,13 +1016,13 @@ async function toggleJob(job: any) {
       toast(res.data.message || tm("messages.updateFailed"), "error");
       await loadJobs();
     }
-  } catch (e: any) {
-    toast(e?.response?.data?.message || tm("messages.updateFailed"), "error");
+  } catch (error: unknown) {
+    toast(apiErrorMessage(error, tm("messages.updateFailed")), "error");
     await loadJobs();
   }
 }
 
-async function deleteJob(job: any) {
+async function deleteJob(job: CronJob) {
   try {
     const res = await cronApi.delete(job.job_id);
     if (res.data.status === "ok") {
@@ -937,14 +1031,14 @@ async function deleteJob(job: any) {
     } else {
       toast(res.data.message || tm("messages.deleteFailed"), "error");
     }
-  } catch (e: any) {
-    toast(e?.response?.data?.message || tm("messages.deleteFailed"), "error");
+  } catch (error: unknown) {
+    toast(apiErrorMessage(error, tm("messages.deleteFailed")), "error");
   }
 }
 
-async function runJobNow(job: any) {
+async function runJobNow(job: CronJob) {
   const jobId = String(job.job_id || "");
-  if (!jobId || runningJobIds.value.has(jobId)) return;
+  if (!jobId || !canRunJobNow(job)) return;
   runningJobIds.value = new Set([...runningJobIds.value, jobId]);
   try {
     const res = await cronApi.run(jobId);
@@ -954,8 +1048,8 @@ async function runJobNow(job: any) {
     } else {
       toast(res.data.message || tm("messages.runFailed"), "error");
     }
-  } catch (e: any) {
-    toast(e?.response?.data?.message || tm("messages.runFailed"), "error");
+  } catch (error: unknown) {
+    toast(apiErrorMessage(error, tm("messages.runFailed")), "error");
   } finally {
     const next = new Set(runningJobIds.value);
     next.delete(jobId);
@@ -964,17 +1058,19 @@ async function runJobNow(job: any) {
 }
 
 function openCreate() {
+  scriptDetailRequestGeneration += 1;
   editingJobId.value = "";
   jobType.value = "active_agent";
-  scriptPayload.value = {};
+  scriptPayload.value = createEmptyScriptTaskForm();
   scriptDetail.value = null;
+  scriptDetailLoading.value = false;
   resetNewJob();
   createDialog.value = true;
   loadUmos();
   loadLanguages();
 }
 
-function toDatetimeLocalValue(value: any): string {
+function toDatetimeLocalValue(value?: string | null): string {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
@@ -1009,10 +1105,12 @@ function resetNewJob() {
   };
 }
 
-function openEdit(job: any) {
+function openEdit(job: CronJob) {
+  scriptDetailRequestGeneration += 1;
+  scriptDetailLoading.value = false;
   editingJobId.value = job.job_id;
   scriptDetail.value = null;
-  scriptPayload.value = {};
+  scriptPayload.value = createEmptyScriptTaskForm();
   if (job.job_type === "script") {
     jobType.value = "script";
     createDialog.value = true;
@@ -1047,13 +1145,32 @@ function openEdit(job: any) {
   loadUmos(true);
 }
 
+function isScriptCronJobDetail(
+  job: CronJob | ScriptCronJobDetail,
+): job is ScriptCronJobDetail {
+  return job.job_type === "script" && Boolean(job.script);
+}
+
 async function loadScriptDetail(jobId: string) {
+  const generation = ++scriptDetailRequestGeneration;
   scriptDetailLoading.value = true;
   try {
-    const res: any = await cronApi.get(jobId);
-    const data = res.data ?? res;
+    const res = await cronApi.get(jobId);
+    if (
+      generation !== scriptDetailRequestGeneration ||
+      editingJobId.value !== jobId
+    ) {
+      return;
+    }
+    if (res.data.status !== "ok") {
+      throw new Error(res.data.message || tm("messages.loadFailed"));
+    }
+    const data = res.data.data;
+    if (!isScriptCronJobDetail(data)) {
+      throw new Error(tm("messages.scriptDetailInvalid"));
+    }
     scriptDetail.value = data;
-    const script = data.script || {};
+    const script = data.script;
     scriptPayload.value = {
       name: data.name || "",
       note: data.note || data.description || "",
@@ -1065,24 +1182,57 @@ async function loadScriptDetail(jobId: string) {
       enabled: data.enabled !== false,
       source: script.source || "",
       language_version:
-        script.language_version || "astrbot-python-subset/v1",
+        script.language_version || DEFAULT_SCRIPT_LANGUAGE_VERSION,
     };
-  } catch (e: any) {
-    toast(e?.response?.data?.message || tm("messages.loadFailed"), "error");
+  } catch (error: unknown) {
+    if (
+      generation !== scriptDetailRequestGeneration ||
+      editingJobId.value !== jobId
+    ) {
+      return;
+    }
+    toast(apiErrorMessage(error, tm("messages.loadFailed")), "error");
+    closeJobDialog();
   } finally {
-    scriptDetailLoading.value = false;
+    if (generation === scriptDetailRequestGeneration) {
+      scriptDetailLoading.value = false;
+    }
   }
 }
 
-async function loadLanguages() {
-  if (languageRegistry.value) return;
+async function loadLanguages(): Promise<boolean> {
+  if (languageRegistry.value) return true;
+  if (languageRegistryLoading.value) return false;
+  languageRegistryLoading.value = true;
   try {
-    const res: any = await cronApi.scriptLanguages();
-    const data = res.data ?? res;
-    languageRegistry.value = data;
-  } catch {
+    const res = await cronApi.scriptLanguages();
+    if (res.data.status === "ok") {
+      languageRegistry.value = res.data.data;
+      return true;
+    }
+    toast(res.data.message || tm("messages.languagesLoadFailed"), "error");
+  } catch (error: unknown) {
     languageRegistry.value = null;
+    toast(apiErrorMessage(error, tm("messages.languagesLoadFailed")), "error");
+  } finally {
+    languageRegistryLoading.value = false;
   }
+  return false;
+}
+
+function handleStateReset(detail: ScriptCronJobDetail) {
+  if (detail.job_id === editingJobId.value) {
+    scriptDetail.value = detail;
+  }
+}
+
+function closeJobDialog() {
+  scriptDetailRequestGeneration += 1;
+  createDialog.value = false;
+  editingJobId.value = "";
+  scriptDetail.value = null;
+  scriptPayload.value = createEmptyScriptTaskForm();
+  scriptDetailLoading.value = false;
 }
 
 function parseTimeParts(
@@ -1146,7 +1296,7 @@ function buildCronExpression(): string {
   return newJob.value.cron_expression.trim();
 }
 
-function readScheduleFromJob(job: any) {
+function readScheduleFromJob(job: CronJob) {
   const fallback = {
     schedule_mode: "cron" as ScheduleMode,
     cron_expression: job.cron_expression || "",
@@ -1269,7 +1419,7 @@ function readScheduleFromJob(job: any) {
   return fallback;
 }
 
-function buildPayload() {
+function buildPayload(): CronJobRequest {
   const runOnce = newJob.value.schedule_mode === "once";
   const cronExpression = runOnce ? "" : buildCronExpression();
   return {
@@ -1284,25 +1434,34 @@ function buildPayload() {
   };
 }
 
-function buildScriptPayload() {
+function normalizeScriptRunAt(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const date = new Date(trimmed);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+function buildScriptPayload(): ScriptTaskRequest {
   const payload = { ...scriptPayload.value };
+  const runAt = payload.run_once
+    ? normalizeScriptRunAt(payload.run_at) || ""
+    : "";
   return {
-    job_type: "script" as const,
+    job_type: "script",
     name: String(payload.name || "script_task").trim(),
     note: String(payload.note || "").trim(),
     bound_umo: String(payload.bound_umo || "").trim(),
-    cron_expression: payload.run_once ? null : String(payload.cron_expression || ""),
+    cron_expression: payload.run_once
+      ? ""
+      : String(payload.cron_expression || ""),
     run_once: Boolean(payload.run_once),
-    run_at: payload.run_once
-      ? payload.run_at
-        ? new Date(payload.run_at).toISOString()
-        : ""
-      : "",
+    run_at: runAt,
     timezone: String(payload.timezone || ""),
     enabled: payload.enabled !== false,
     source: String(payload.source || ""),
     language_version: String(
-      payload.language_version || "astrbot-python-subset/v1",
+      payload.language_version || DEFAULT_SCRIPT_LANGUAGE_VERSION,
     ),
   };
 }
@@ -1320,6 +1479,10 @@ function validateScriptForm(): boolean {
   if (payload.run_once) {
     if (!payload.run_at) {
       toast(tm("messages.runAtRequired"), "warning");
+      return false;
+    }
+    if (!normalizeScriptRunAt(payload.run_at)) {
+      toast(tm("messages.runAtInvalid"), "warning");
       return false;
     }
     return true;
@@ -1418,7 +1581,7 @@ async function createJob() {
 
   creating.value = true;
   try {
-    const payload: any =
+    const payload: CronJobRequest =
       jobType.value === "script" ? buildScriptPayload() : buildPayload();
     const res = await cronApi.create(payload);
     if (res.data.status === "ok") {
@@ -1430,8 +1593,8 @@ async function createJob() {
     } else {
       toast(res.data.message || tm("messages.createFailed"), "error");
     }
-  } catch (e: any) {
-    toast(e?.response?.data?.message || tm("messages.createFailed"), "error");
+  } catch (error: unknown) {
+    toast(apiErrorMessage(error, tm("messages.createFailed")), "error");
   } finally {
     creating.value = false;
   }
@@ -1447,7 +1610,7 @@ async function updateJob() {
 
   creating.value = true;
   try {
-    const payload: any =
+    const payload: CronJobRequest =
       jobType.value === "script"
         ? {
             ...buildScriptPayload(),
@@ -1467,14 +1630,15 @@ async function updateJob() {
     } else {
       toast(res.data.message || tm("messages.updateFailed"), "error");
     }
-  } catch (e: any) {
-    toast(e?.response?.data?.message || tm("messages.updateFailed"), "error");
+  } catch (error: unknown) {
+    toast(apiErrorMessage(error, tm("messages.updateFailed")), "error");
   } finally {
     creating.value = false;
   }
 }
 
 async function submitJob() {
+  if (submitDisabled.value) return;
   if (isEditing.value) {
     await updateJob();
     return;
@@ -1486,6 +1650,23 @@ onMounted(() => {
   loadJobs();
   loadPlatforms();
 });
+
+watch(createDialog, (open) => {
+  if (!open && (editingJobId.value || scriptDetailLoading.value)) {
+    closeJobDialog();
+  }
+});
+
+function apiErrorMessage(error: unknown, fallback: string): string {
+  const envelope = (error as { response?: { data?: CronApiErrorEnvelope } })
+    .response?.data;
+  const message =
+    envelope?.message ||
+    (error instanceof Error ? error.message : "") ||
+    fallback;
+  const code = envelope?.data?.code;
+  return code ? `${message} (${code})` : message;
+}
 </script>
 
 <style scoped>
@@ -1586,6 +1767,22 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.task-authorization-warning {
+  display: flex;
+  align-items: center;
+  margin-top: 6px;
+  color: rgb(var(--v-theme-warning));
+}
+
+.script-detail-loading {
+  display: flex;
+  min-height: 260px;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--dashboard-muted);
 }
 
 .cron-umo-platform {

@@ -33,114 +33,177 @@ from astrbot.script_runtime.values import SafeValue
 # ---------------------------------------------------------------------------
 
 
+class _StateContainerSnapshot:
+    """A rollback snapshot that retains every pre-mutation container object."""
+
+    def __init__(self, container: Any, children: dict[Any, Any] | list[Any]) -> None:
+        self.container = container
+        self.children = children
+
+
+class _StateGraph:
+    """A shared transaction context for every container in the state tree."""
+
+    def __init__(self, atomic: AtomicState) -> None:
+        self.atomic = atomic
+        self.root = self._wrap_dict(atomic.snapshot())
+
+    def _wrap_dict(self, value: dict[Any, Any]) -> StateDict:
+        return StateDict(
+            self,
+            {key: self.wrap(item) for key, item in value.items()},
+        )
+
+    def _wrap_list(self, value: list[Any]) -> StateList:
+        return StateList(self, [self.wrap(item) for item in value])
+
+    def wrap(self, value: Any) -> Any:
+        if isinstance(value, (StateDict, StateList)):
+            value = self.to_plain(value)
+        if isinstance(value, dict):
+            return self._wrap_dict(value)
+        if isinstance(value, list):
+            return self._wrap_list(value)
+        return value
+
+    def to_plain(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: self.to_plain(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self.to_plain(item) for item in value]
+        return value
+
+    def mutate(self, mutation) -> Any:
+        """Apply one mutation and roll the live graph back if validation fails."""
+        before = self._capture(self.root)
+        try:
+            result = mutation()
+            self.atomic.commit(self.to_plain(self.root))
+            return result
+        except Exception:
+            self._restore(before)
+            raise
+
+    def _capture(self, value: Any) -> Any:
+        if isinstance(value, StateDict):
+            return _StateContainerSnapshot(
+                value,
+                {key: self._capture(item) for key, item in value.items()},
+            )
+        if isinstance(value, StateList):
+            return _StateContainerSnapshot(
+                value,
+                [self._capture(item) for item in value],
+            )
+        return value
+
+    def _restore(self, snapshot: Any) -> Any:
+        if not isinstance(snapshot, _StateContainerSnapshot):
+            return snapshot
+        target = snapshot.container
+        if isinstance(target, StateDict) and isinstance(snapshot.children, dict):
+            dict.clear(target)
+            for key, child in snapshot.children.items():
+                dict.__setitem__(target, key, self._restore(child))
+            return target
+        if isinstance(target, StateList) and isinstance(snapshot.children, list):
+            list.clear(target)
+            list.extend(target, [self._restore(child) for child in snapshot.children])
+            return target
+        raise TypeError("state rollback snapshot does not match its container")
+
+
 class StateDict(dict):
-    """A dict whose mutations atomically validate the whole root state."""
+    """A dict whose mutations commit the complete shared root state."""
 
-    def __init__(self, root: AtomicState, data: dict) -> None:
-        super().__init__(data)
-        self._root = root
-
-    def _commit(self) -> None:
-        self._root.commit(self)
+    def __init__(self, graph: _StateGraph, data: dict[Any, Any]) -> None:
+        dict.__init__(self, data)
+        self._graph = graph
 
     def __setitem__(self, key: Any, value: Any) -> None:
-        dict.__setitem__(self, key, value)
-        self._commit()
+        self._graph.mutate(lambda: dict.__setitem__(self, key, self._graph.wrap(value)))
 
     def __delitem__(self, key: Any) -> None:
-        dict.__delitem__(self, key)
-        self._commit()
+        self._graph.mutate(lambda: dict.__delitem__(self, key))
 
     def pop(self, *args: Any) -> Any:
-        result = dict.pop(self, *args)
-        self._commit()
-        return result
+        return self._graph.mutate(lambda: dict.pop(self, *args))
 
     def popitem(self) -> Any:
-        result = dict.popitem(self)
-        self._commit()
-        return result
+        return self._graph.mutate(lambda: dict.popitem(self))
 
     def clear(self) -> None:
-        dict.clear(self)
-        self._commit()
+        self._graph.mutate(lambda: dict.clear(self))
 
     def update(self, *args: Any, **kwargs: Any) -> None:
-        dict.update(self, *args, **kwargs)
-        self._commit()
+        updates = dict(*args, **kwargs)
 
-    def setdefault(self, *args: Any) -> Any:
-        result = dict.setdefault(self, *args)
-        self._commit()
-        return result
+        def apply() -> None:
+            for key, value in updates.items():
+                dict.__setitem__(self, key, self._graph.wrap(value))
+
+        self._graph.mutate(apply)
+
+    def setdefault(self, key: Any, default: Any = None) -> Any:
+        if key in self:
+            return dict.__getitem__(self, key)
+
+        def apply() -> Any:
+            value = self._graph.wrap(default)
+            dict.__setitem__(self, key, value)
+            return value
+
+        return self._graph.mutate(apply)
 
 
 class StateList(list):
-    """A list whose mutations atomically validate the whole root state."""
+    """A list whose mutations commit the complete shared root state."""
 
-    def __init__(self, root: AtomicState, data: list) -> None:
-        super().__init__(data)
-        self._root = root
-
-    def _commit(self) -> None:
-        self._root.commit(self)
+    def __init__(self, graph: _StateGraph, data: list[Any]) -> None:
+        list.__init__(self, data)
+        self._graph = graph
 
     def __setitem__(self, key: Any, value: Any) -> None:
-        list.__setitem__(self, key, value)
-        self._commit()
+        converted = (
+            [self._graph.wrap(item) for item in value]
+            if isinstance(key, slice)
+            else self._graph.wrap(value)
+        )
+        self._graph.mutate(lambda: list.__setitem__(self, key, converted))
 
     def __delitem__(self, key: Any) -> None:
-        list.__delitem__(self, key)
-        self._commit()
+        self._graph.mutate(lambda: list.__delitem__(self, key))
 
     def append(self, value: Any) -> None:
-        list.append(self, value)
-        self._commit()
+        self._graph.mutate(lambda: list.append(self, self._graph.wrap(value)))
 
     def extend(self, values: Any) -> None:
-        list.extend(self, values)
-        self._commit()
+        converted = [self._graph.wrap(value) for value in values]
+        self._graph.mutate(lambda: list.extend(self, converted))
 
     def insert(self, index: int, value: Any) -> None:
-        list.insert(self, index, value)
-        self._commit()
+        self._graph.mutate(lambda: list.insert(self, index, self._graph.wrap(value)))
 
     def pop(self, *args: Any) -> Any:
-        result = list.pop(self, *args)
-        self._commit()
-        return result
+        return self._graph.mutate(lambda: list.pop(self, *args))
 
     def remove(self, value: Any) -> None:
-        list.remove(self, value)
-        self._commit()
+        self._graph.mutate(lambda: list.remove(self, value))
 
     def clear(self) -> None:
-        list.clear(self)
-        self._commit()
+        self._graph.mutate(lambda: list.clear(self))
 
     def reverse(self) -> None:
-        list.reverse(self)
-        self._commit()
+        self._graph.mutate(lambda: list.reverse(self))
 
     def sort(self, *args: Any, **kwargs: Any) -> None:
         if kwargs:
             raise TypeError("sort() does not accept keyword arguments")
-        list.sort(self, *args)
-        self._commit()
-
-
-def _make_state_container(root: AtomicState, value: Any) -> Any:
-    """Convert nested plain containers into state-aware containers."""
-    if isinstance(value, dict):
-        converted = {k: _make_state_container(root, v) for k, v in value.items()}
-        return StateDict(root, converted)
-    if isinstance(value, list):
-        return StateList(root, [_make_state_container(root, item) for item in value])
-    return value
+        self._graph.mutate(lambda: list.sort(self, *args))
 
 
 def build_state_dict(root: AtomicState) -> StateDict:
-    return _make_state_container(root, root.snapshot())
+    return _StateGraph(root).root
 
 
 # ---------------------------------------------------------------------------
@@ -740,10 +803,7 @@ class Stdlib:
 
     def get_item(self, sv: SafeValue, key: SafeValue) -> SafeValue:
         if sv.kind == spec.KIND_STATE:
-            result = sv.value[key.value]
-            if isinstance(result, (StateDict, StateList)):
-                return SafeValue(spec.KIND_STATE, result)
-            return wrap(result)
+            return wrap(sv.value[key.value])
         if sv.kind == spec.KIND_DICT:
             return wrap(sv.value[key.value])
         if sv.kind == spec.KIND_HEADERS:
@@ -1373,15 +1433,8 @@ def _method_dispatch_table() -> dict[str, dict[str, Any]]:
 _METHOD_DISPATCH = _method_dispatch_table()
 
 
-def _state_read_value(container: Any, value: Any) -> Any:
-    """Wrap nested state containers so later mutations stay state-aware."""
-    if isinstance(value, dict):
-        return value
-    return value
-
-
 def _state_write(container: Any, key: Any, value: Any) -> None:
-    container[key] = _make_state_container(container._root, value)
+    container[key] = value
 
 
 def _state_delete(container: Any, key: Any) -> None:

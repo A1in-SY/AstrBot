@@ -20,13 +20,14 @@ from typing import Any
 
 from astrbot.script_runtime import spec
 from astrbot.script_runtime.errors import (
-    ALL_CATCHABLE,
     ScriptHostCancelled,
     ScriptInterrupted,
     ScriptLanguageVersionError,
     ScriptLimitsError,
     ScriptProtocolError,
+    ScriptRuntimeError,
     SendError,
+    is_script_catchable,
 )
 from astrbot.script_runtime.http import ScriptHttpClient
 from astrbot.script_runtime.interpreter import Interpreter, RunFacade
@@ -213,19 +214,7 @@ async def _handle_execute(request: dict[str, Any]) -> int:
     interpreter = Interpreter(stdlib, deadline=deadline)
     try:
         await interpreter.run_module(source)
-    except tuple(ALL_CATCHABLE) as exc:
-        _write(
-            {
-                "protocol_version": PROTOCOL_VERSION,
-                "type": "failed",
-                "run_id": run_id,
-                "error_code": "UNCAUGHT_SCRIPT_EXCEPTION",
-                "error_type": type(exc).__name__,
-                "message": str(exc),
-            }
-        )
-        return 0
-    except (ScriptInterrupted,) as exc:
+    except ScriptInterrupted as exc:
         _write(
             {
                 "protocol_version": PROTOCOL_VERSION,
@@ -247,7 +236,30 @@ async def _handle_execute(request: dict[str, Any]) -> int:
             }
         )
         return 0
+    except ScriptRuntimeError as exc:
+        _write(
+            {
+                "protocol_version": PROTOCOL_VERSION,
+                "type": "failed",
+                "run_id": run_id,
+                "error_code": "SCRIPT_WORKER_CRASHED",
+                "message": str(exc),
+            }
+        )
+        return 1
     except Exception as exc:  # noqa: BLE001
+        if is_script_catchable(exc):
+            _write(
+                {
+                    "protocol_version": PROTOCOL_VERSION,
+                    "type": "failed",
+                    "run_id": run_id,
+                    "error_code": "UNCAUGHT_SCRIPT_EXCEPTION",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                }
+            )
+            return 0
         _write(
             {
                 "protocol_version": PROTOCOL_VERSION,
