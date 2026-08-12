@@ -340,7 +340,9 @@ async def test_list_documents_trims_search_and_turns_empty_to_none():
     await service.list_documents(kb_id="kb1", page=1, page_size=10, search="   ")
 
     kb_helper.list_documents.assert_awaited_once_with(
-        offset=0, limit=10, search=None,
+        offset=0,
+        limit=10,
+        search=None,
     )
 
 
@@ -352,7 +354,10 @@ async def test_list_documents_total_comes_from_count_documents():
     kb_helper.count_documents.return_value = 42
 
     result = await service.list_documents(
-        kb_id="kb1", page=1, page_size=10, search="  foo  ",
+        kb_id="kb1",
+        page=1,
+        page_size=10,
+        search="  foo  ",
     )
 
     assert result["total"] == 42

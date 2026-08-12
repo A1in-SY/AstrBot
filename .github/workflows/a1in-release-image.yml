@@ -34,7 +34,8 @@ jobs:
             exit 1
           fi
 
-          upstream_base_tag="v${BASH_REMATCH[1]}"
+          upstream_version="${BASH_REMATCH[1]}"
+          upstream_base_tag="v${upstream_version}"
           release_revision="${BASH_REMATCH[2]}"
           image_tag="${upstream_base_tag}-a1in.${release_revision}"
           if ! git rev-parse --verify --quiet "${upstream_base_tag}^{commit}" >/dev/null; then
@@ -88,6 +89,7 @@ jobs:
 
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
           echo "release_revision=$release_revision" >> "$GITHUB_OUTPUT"
+          echo "upstream_version=$upstream_version" >> "$GITHUB_OUTPUT"
           echo "upstream_base_tag=$upstream_base_tag" >> "$GITHUB_OUTPUT"
           echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
@@ -112,7 +114,7 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run build
           mkdir -p dist/assets
-          echo "${{ steps.metadata.outputs.upstream_base_tag }}" > dist/assets/version
+          echo "${{ steps.metadata.outputs.upstream_version }}" > dist/assets/version
           echo "${{ steps.metadata.outputs.release_tag }}" > dist/assets/a1in-release
 
       - name: Bundle dashboard assets

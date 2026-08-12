@@ -1,4 +1,4 @@
-/* Auto-generated MDI subset – 274 icons */
+/* Auto-generated MDI subset – 271 icons */
 /* Do not edit manually. Run: pnpm run subset-icons */
 
 @font-face {
@@ -24,20 +24,12 @@
   content: "\F0004";
 }
 
-.mdi-account-circle::before {
-  content: "\F0009";
-}
-
 .mdi-account-edit::before {
   content: "\F06BC";
 }
 
 .mdi-account-edit-outline::before {
   content: "\F0FFB";
-}
-
-.mdi-account-heart::before {
-  content: "\F0899";
 }
 
 .mdi-account-voice::before {
@@ -162,6 +154,10 @@
 
 .mdi-chat::before {
   content: "\F0B79";
+}
+
+.mdi-chat-outline::before {
+  content: "\F0EDE";
 }
 
 .mdi-chat-processing::before {
@@ -496,16 +492,8 @@
   content: "\F0234";
 }
 
-.mdi-folder::before {
-  content: "\F024B";
-}
-
 .mdi-folder-move::before {
   content: "\F0252";
-}
-
-.mdi-folder-multiple::before {
-  content: "\F0253";
 }
 
 .mdi-folder-open::before {
@@ -580,6 +568,10 @@
   content: "\F02DC";
 }
 
+.mdi-home-outline::before {
+  content: "\F06A1";
+}
+
 .mdi-hook::before {
   content: "\F06E2";
 }
@@ -646,6 +638,10 @@
 
 .mdi-lightning-bolt::before {
   content: "\F140B";
+}
+
+.mdi-lightning-bolt-outline::before {
+  content: "\F140C";
 }
 
 .mdi-link::before {
@@ -908,10 +904,6 @@
   content: "\F1165";
 }
 
-.mdi-server::before {
-  content: "\F048B";
-}
-
 .mdi-server-network::before {
   content: "\F048D";
 }
@@ -986,10 +978,6 @@
 
 .mdi-stop-circle::before {
   content: "\F0666";
-}
-
-.mdi-store::before {
-  content: "\F04DC";
 }
 
 .mdi-subdirectory-arrow-right::before {

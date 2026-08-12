@@ -2,6 +2,8 @@
 
 本仓库是 A1in 长期维护的 AstrBot 私有 fork，不向官方仓库提交 PR。本文定义分支职责、版本语义、上游同步、镜像发布和生产升级规则。
 
+当前维护基线为官方稳定 tag `v4.27.2`，当前 A1in source release 为 `a1in-v4.27.2.1`。
+
 ## 1. 基本原则
 
 ```text
@@ -34,14 +36,14 @@ A1in fork 负责私有功能、发布、镜像、部署和回滚。
 
 一个 A1in release 同时包含“官方兼容版本”和“A1in 发行版本”。两者不能互相覆盖。
 
-| 字段 | 位置 | 语义 | `a1in-v4.26.8.10` 示例 |
+| 字段 | 位置 | 语义 | `a1in-v4.27.2.1` 示例 |
 | --- | --- | --- | --- |
-| 官方 Git 基线 | 官方 annotated tag | 吸收上游变更的稳定边界 | `v4.26.8` |
-| 上游兼容版本 | `astrbot/__init__.py` 的 `__version__` | 插件、备份、Dashboard 兼容和官方 API 基线 | `4.26.8` |
-| Python 包版本 | `pyproject.toml` 的 `[project].version` | 必须与 `__version__` 相同 | `4.26.8` |
-| A1in 发行版本 | `astrbot/a1in_release.py` 的 `A1IN_RELEASE` | A1in source release 的唯一源码内身份 | `a1in-v4.26.8.10` |
-| A1in 发行修订号 | `A1IN_RELEASE_REVISION` | 同一官方基线内的 A1in release 序号 | `10` |
-| 上游基线 tag | `A1IN_UPSTREAM_BASE_TAG` | 由 `__version__` 推导的官方 tag | `v4.26.8` |
+| 官方 Git 基线 | 官方稳定 tag | 吸收上游变更的稳定边界 | `v4.27.2` |
+| 上游兼容版本 | `astrbot/__init__.py` 的 `__version__` | 插件、备份、Dashboard 兼容和官方 API 基线 | `4.27.2` |
+| Python 包版本 | `pyproject.toml` 的 `[project].version` | 必须与 `__version__` 相同 | `4.27.2` |
+| A1in 发行版本 | `astrbot/a1in_release.py` 的 `A1IN_RELEASE` | A1in source release 的唯一源码内身份 | `a1in-v4.27.2.1` |
+| A1in 发行修订号 | `A1IN_RELEASE_REVISION` | 同一官方基线内的 A1in release 序号 | `1` |
+| 上游基线 tag | `A1IN_UPSTREAM_BASE_TAG` | 由 `__version__` 推导的官方 tag | `v4.27.2` |
 
 更新官方版本时，必须同步更新 `pyproject.toml` 与 `astrbot/__init__.py`。不要把 A1in release string 写进 `__version__`：该字段仍被 Dashboard 下载、插件兼容、备份和版本比较逻辑使用。
 
@@ -58,19 +60,19 @@ Immutable identity:   local image ID sha256:<image-id>
 
 | 场景 | Git tag | Human image tag |
 | --- | --- | --- |
-| 官方 `v4.26.8` 上的第 10 个 A1in release | `a1in-v4.26.8.10` | `v4.26.8-a1in.10` |
-| 官方 `v4.26.9` 同步完成后的第一个 A1in release | `a1in-v4.26.9.1` | `v4.26.9-a1in.1` |
-| 官方未来 `v4.27.0` 同步完成后的第一个 A1in release | `a1in-v4.27.0.1` | `v4.27.0-a1in.1` |
+| 官方 `v4.27.2` 上的第一个 A1in release | `a1in-v4.27.2.1` | `v4.27.2-a1in.1` |
+| 官方 `v4.27.3` 同步完成后的第一个 A1in release | `a1in-v4.27.3.1` | `v4.27.3-a1in.1` |
+| 官方未来 `v4.28.0` 同步完成后的第一个 A1in release | `a1in-v4.28.0.1` | `v4.28.0-a1in.1` |
 
-裸 `v4.27.0` 保留给官方 release 语义，不可用于 A1in 自行发布。已经推送或部署的 A1in tag 和 human image tag 永不重写、永不移动；发现问题时发布下一个修订号。`a1in-v4.26.8.1` 的重打包是“旧版本未部署”的一次性历史例外，archive tag 已保留证据，不得作为后续惯例。
+裸 `v4.28.0` 保留给官方 release 语义，不可用于 A1in 自行发布。已经推送或部署的 A1in tag 和 human image tag 永不重写、永不移动；发现问题时发布下一个修订号。`a1in-v4.26.8.1` 的重打包是“旧版本未部署”的一次性历史例外，archive tag 已保留证据，不得作为后续惯例。
 
 ## 4. 运行时身份与 Dashboard
 
 `astrbot/a1in_release.py` 是 A1in 发行身份的源码内单一事实来源。运行时至少应暴露：
 
 ```text
-Upstream compatibility: v4.26.8
-A1in release:           a1in-v4.26.8.10
+Upstream compatibility: v4.27.2
+A1in release:           a1in-v4.27.2.1
 Source revision:         <image build commit>
 Execution Trace:         Core-managed
 ```
@@ -81,8 +83,8 @@ Dashboard 有两个不同的版本文件：
 
 | 文件 | 值 | 用途 |
 | --- | --- | --- |
-| `dist/assets/version` | 官方兼容 tag，例如 `v4.26.8` | Core 与 Dashboard 的兼容性判定 |
-| `dist/assets/a1in-release` | A1in release tag，例如 `a1in-v4.26.8.10` | 构建产物身份、排障和持久化 Dashboard 缓存校验 |
+| `dist/assets/version` | 官方兼容版本，例如 `4.27.2` | Core 与 Dashboard 的兼容性判定 |
+| `dist/assets/a1in-release` | A1in release tag，例如 `a1in-v4.27.2.1` | 构建产物身份、排障和持久化 Dashboard 缓存校验 |
 
 不得把 `a1in-v...` 写进 `dist/assets/version`。该文件必须继续与 Core 的官方兼容版本匹配，否则 Core 会把已捆绑 Dashboard 误判为版本不兼容。对于 A1in 管理的镜像，若持久化 `data/dist` 的 `assets/a1in-release` 缺失或与镜像 bundled Dashboard 不一致，启动时必须用 bundled Dashboard 替换它；仅匹配官方兼容版本不足以证明前端与当前 A1in 修订版一致。
 
@@ -106,7 +108,7 @@ A1in release 默认不允许 Core 或 Dashboard 从官方 AstrBot 源自动下�
 2. 完成实现、审查、Core 测试、Dashboard 检查和插件兼容测试。
 3. 合并到 `master`。
 4. 在 `release/<topic>` 上更新 `astrbot/a1in_release.py` 的正式 release 值并完成最终验证。
-5. 将 release branch 合并到 `master`，创建 annotated tag，例如 `a1in-v4.26.8.10`，并将 `master` 和 tag 推送到 `origin`。
+5. 将 release branch 合并到 `master`，创建 annotated tag，例如 `a1in-v4.27.2.1`，并将 `master` 和 tag 推送到 `origin`。
 6. 生产服务器从 `origin` fetch 并 checkout 精确 release tag，在服务器本机构建 Dashboard 和原生架构 Docker image。
 7. 使用 release、source revision、upstream-base 和 update-policy OCI labels 构建唯一、不可覆盖的本地 image tag。
 8. 校验 OCI labels、source revision、Dashboard compatibility marker、A1in release marker 和最终 local image ID。
@@ -117,30 +119,43 @@ release 流程必须验证：Git tag、`A1IN_RELEASE`、`A1IN_RELEASE_REVISION`�
 
 ## 7. 同步新的官方稳定版本
 
-官方发布新的稳定 tag 后，例如 `v4.26.9`：
+官方发布新的稳定 tag 后，例如 `v4.27.3`：
 
 1. `git fetch upstream --tags --prune`，先比较旧基线和新 tag。
 2. 审查 Agent hooks、`ToolLoopAgentRunner`、context manager / compressor、Provider API、Dashboard 和插件 API 的变化。
-3. 从当前 A1in `master` 创建 `sync/upstream-v4.26.9`。
-4. 将官方 `v4.26.9` tag merge 到该同步分支；不要 merge `upstream/master`。
+3. 从当前 A1in `master` 创建 `sync/upstream-v4.27.3`。
+4. 将官方 `v4.27.3` tag merge 到该同步分支；不要 merge `upstream/master`。
 5. 解决冲突，明确记录所有 A1in 行为偏差。
-6. 将 `pyproject.toml` 与 `astrbot/__init__.py` 更新为 `4.26.9`，并将下一发行身份准备为 `a1in-v4.26.9.1`。
+6. 将 `pyproject.toml` 与 `astrbot/__init__.py` 更新为 `4.27.3`，并将下一发行身份准备为 `a1in-v4.27.3.1`。
 7. 完成 Core 全量测试、Dashboard 检查、插件降级 / 完整 Trace 兼容测试和容器 smoke test。
-8. 合并同步分支到 `master`，创建 `a1in-v4.26.9.1`，由生产服务器 checkout 精确 tag 并构建唯一的本地镜像。
+8. 合并同步分支到 `master`，创建 `a1in-v4.27.3.1`，由生产服务器 checkout 精确 tag 并构建唯一的本地镜像。
 9. 验证后删除同步分支，保留旧 A1in tag、旧 local image ID 和旧 compose 作为回滚点。
 
 官方 `master` 仅供观察。除紧急安全事件且有单独记录外，生产 release 只能以官方稳定 tag 为上游同步边界。
 
 ## 8. API 兼容与 A1in 扩展
 
-每个 A1in release 对外应明确声明：
+当前 `a1in-v4.27.2.1` 的兼容声明如下：
 
 ```text
-官方兼容基线：<upstream tag>
-A1in release：<a1in tag>
-已知 A1in 扩展：<capability list>
-已知行为偏差：<documented deviations>
+官方兼容基线：v4.27.2
+A1in release：a1in-v4.27.2.1
 ```
+
+已知 A1in 扩展：
+
+- Core-managed Execution Trace、插件 Tracer、Provider/TTS/Agent/Tool/Skill 插桩。
+- `job_type=script` 的 Script Task、事务式更新与回滚、重启恢复、allowlist、状态持久化和群/私聊管理边界。
+- 官方兼容版本与 A1in release 的双版本身份，以及 Dashboard 双标记缓存校验。
+- 可配置 Web Search 地址和既有 A1in 插件接口。
+
+已知行为偏差：
+
+- 官方 Core、CLI 和 Dashboard 自更新默认 fail-closed；只有维护者显式设置 `A1IN_ALLOW_OFFICIAL_UPDATES=1` 才放行网络检查、下载和应用，本地/随包 Dashboard 加载不受阻断。
+- Cron/Trace 管理接口继续使用 `system` scope；该 scope 不在默认或可分配的普通 API Key scope 中。
+- 群总结插件继续使用独立的 `group_summary.db`、游标和触发逻辑；Core 群历史默认关闭，开启后也不迁移或共享插件历史。
+- 出站 TTS 文件采用官方 v4.27.2 生命周期，不再绑定单事件提前删除；A1in 仍记录 `tts.pipeline` 与 Provider Span。
+- 内部 Updater 只提供 `astrbot.core.updater.AstrBotUpdater`；已删除的 `astrbot.core.updator` 不提供私有兼容别名。
 
 私有功能优先设计为显式、可检测、可文档化的扩展。插件不能只通过 `AstrBot >= X.Y.Z` 推断 A1in 私有能力。
 

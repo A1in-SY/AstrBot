@@ -250,7 +250,9 @@ async def test_create_kb_raises_when_embedding_provider_is_missing():
     kb_manager = MagicMock()
     service = make_service(kb_manager)
 
-    with pytest.raises(KnowledgeBaseServiceError, match="缺少参数 embedding_provider_id"):
+    with pytest.raises(
+        KnowledgeBaseServiceError, match="缺少参数 embedding_provider_id"
+    ):
         await service.create_kb({"kb_name": "Test KB"})
 
 

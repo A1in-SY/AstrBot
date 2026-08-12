@@ -1902,36 +1902,50 @@ class TestHasLoadedCExtension:
 
     def test_detects_pyd_extension(self, monkeypatch):
         """已加载子模块的 __file__ 为 .pyd 时应返回 True。"""
-        _set_modules(monkeypatch, {
-            "pikepdf": _make_fake_module("/site-packages/pikepdf/__init__.py"),
-            "pikepdf._core": _make_fake_module("/site-packages/pikepdf/_core.pyd"),
-        })
+        _set_modules(
+            monkeypatch,
+            {
+                "pikepdf": _make_fake_module("/site-packages/pikepdf/__init__.py"),
+                "pikepdf._core": _make_fake_module("/site-packages/pikepdf/_core.pyd"),
+            },
+        )
         assert pip_installer_module._has_loaded_c_extension("pikepdf") is True
 
     def test_detects_so_extension(self, monkeypatch):
         """已加载子模块的 __file__ 为 .so 时应返回 True。"""
-        _set_modules(monkeypatch, {
-            "pikepdf": _make_fake_module("/site-packages/pikepdf/__init__.py"),
-            "pikepdf._core": _make_fake_module("/site-packages/pikepdf/_core.cpython-311-x86_64-linux-gnu.so"),
-        })
+        _set_modules(
+            monkeypatch,
+            {
+                "pikepdf": _make_fake_module("/site-packages/pikepdf/__init__.py"),
+                "pikepdf._core": _make_fake_module(
+                    "/site-packages/pikepdf/_core.cpython-311-x86_64-linux-gnu.so"
+                ),
+            },
+        )
         assert pip_installer_module._has_loaded_c_extension("pikepdf") is True
 
     def test_detects_extension_case_insensitive(self, monkeypatch):
         """后缀比较应忽略大小写（.PYD / .SO 也视为 C 扩展）。"""
-        _set_modules(monkeypatch, {
-            "pikepdf": _make_fake_module("/site-packages/pikepdf/__init__.py"),
-            "pikepdf._core": _make_fake_module("/site-packages/pikepdf/_core.PYD"),
-        })
+        _set_modules(
+            monkeypatch,
+            {
+                "pikepdf": _make_fake_module("/site-packages/pikepdf/__init__.py"),
+                "pikepdf._core": _make_fake_module("/site-packages/pikepdf/_core.PYD"),
+            },
+        )
         assert pip_installer_module._has_loaded_c_extension("pikepdf") is True
 
     # ── 纯 Python 不受影响 ──
 
     def test_returns_false_for_pure_python(self, monkeypatch):
         """不含任何 C 扩展时应返回 False，保留原重载路径。"""
-        _set_modules(monkeypatch, {
-            "img2pdf": _make_fake_module("/site-packages/img2pdf/__init__.py"),
-            "img2pdf.core": _make_fake_module("/site-packages/img2pdf/core.py"),
-        })
+        _set_modules(
+            monkeypatch,
+            {
+                "img2pdf": _make_fake_module("/site-packages/img2pdf/__init__.py"),
+                "img2pdf.core": _make_fake_module("/site-packages/img2pdf/core.py"),
+            },
+        )
         assert pip_installer_module._has_loaded_c_extension("img2pdf") is False
 
     def test_module_not_in_sys_modules(self, monkeypatch):
@@ -1956,17 +1970,23 @@ class TestHasLoadedCExtension:
 
     def test_no_matching_keys(self, monkeypatch):
         """sys.modules 键名完全不匹配时返回 False。"""
-        _set_modules(monkeypatch, {
-            "other": _make_fake_module("/.../other.pyd"),
-        })
+        _set_modules(
+            monkeypatch,
+            {
+                "other": _make_fake_module("/.../other.pyd"),
+            },
+        )
         assert pip_installer_module._has_loaded_c_extension("target") is False
 
     def test_extension_in_parent_not_submodule(self, monkeypatch):
         """C 扩展不在 target 的子树下时不触发。"""
-        _set_modules(monkeypatch, {
-            "other.core": _make_fake_module("/.../core.pyd"),
-            "target": _make_fake_module("/.../target/__init__.py"),
-        })
+        _set_modules(
+            monkeypatch,
+            {
+                "other.core": _make_fake_module("/.../core.pyd"),
+                "target": _make_fake_module("/.../target/__init__.py"),
+            },
+        )
         assert pip_installer_module._has_loaded_c_extension("target") is False
 
     def test_empty_sys_modules(self, monkeypatch):
