@@ -38,11 +38,18 @@ jobs:
           upstream_base_tag="v${upstream_version}"
           release_revision="${BASH_REMATCH[2]}"
           image_tag="${upstream_base_tag}-a1in.${release_revision}"
-          if ! git rev-parse --verify --quiet "${upstream_base_tag}^{commit}" >/dev/null; then
-            echo "Missing declared upstream base tag: $upstream_base_tag" >&2
+          upstream_ref="refs/a1in-upstream/${upstream_base_tag}"
+          if ! git fetch --no-tags --force \
+            https://github.com/AstrBotDevs/AstrBot.git \
+            "refs/tags/${upstream_base_tag}:${upstream_ref}"; then
+            echo "Unable to fetch declared upstream base tag: $upstream_base_tag" >&2
             exit 1
           fi
-          if ! git merge-base --is-ancestor "$upstream_base_tag" HEAD; then
+          if ! git rev-parse --verify --quiet "${upstream_ref}^{commit}" >/dev/null; then
+            echo "Missing fetched upstream base commit: $upstream_base_tag" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${upstream_ref}^{commit}" HEAD; then
             echo "Release commit does not descend from $upstream_base_tag" >&2
             exit 1
           fi
