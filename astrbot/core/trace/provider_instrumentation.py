@@ -118,15 +118,15 @@ def _wrap_coroutine(
             )
             with _span_scope(span, owns_span):
                 _record_request(span, original.__name__, args, kwargs)
-                result = await original(*args, **kwargs)
+                try:
+                    result = await original(*args, **kwargs)
+                except BaseException as exc:
+                    _record_provider_error(span, exc)
+                    raise
                 if not isinstance(span, NoopTraceSpan):
                     span.set_attributes(result_type=type(result).__name__)
                     _record_response(span, result)
                 return result
-        except BaseException as exc:
-            if "span" in locals() and not isinstance(span, NoopTraceSpan):
-                span.add_event("provider.error", exception_type=type(exc).__name__)
-            raise
         finally:
             _provider_families.reset(token)
 
@@ -196,8 +196,7 @@ def _wrap_stream(
                 span.finish(status="cancelled", outcome="cancelled")
             raise
         except BaseException as exc:
-            if not isinstance(span, NoopTraceSpan):
-                span.add_event("provider.error", exception_type=type(exc).__name__)
+            _record_provider_error(span, exc)
             await _close_stream_generator(original_generator, span)
             original_closed = True
             _record_stream_terminal(span, accumulator, chunk_count)
@@ -277,6 +276,20 @@ def _record_request(
         span.record_json(
             "provider.request", provider_request_manifest(method, args, kwargs)
         )
+    except Exception:
+        return
+
+
+def _record_provider_error(
+    span: TraceSpan | NoopTraceSpan,
+    error: BaseException,
+) -> None:
+    """Record a Provider failure without affecting the original exception."""
+
+    if isinstance(span, NoopTraceSpan):
+        return
+    try:
+        span.add_event("provider.error", exception_type=type(error).__name__)
     except Exception:
         return
 

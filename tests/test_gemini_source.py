@@ -3,8 +3,8 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from astrbot.core.exceptions import EmptyModelOutputError
 import astrbot.core.provider.sources.request_retry as request_retry
+from astrbot.core.exceptions import EmptyModelOutputError
 from astrbot.core.provider.entities import LLMResponse
 from astrbot.core.provider.sources.gemini_source import ProviderGoogleGenAI
 

@@ -412,9 +412,10 @@ class TestRunScript:
         aggregate = await _add_script(manager)
         with patch.object(manager, "_woke_main_agent", new_callable=AsyncMock) as woke:
             await manager.run_job_now(aggregate.job.job_id)
-            await asyncio.sleep(0.3)
+            job = await _wait_for_job_status(
+                db, aggregate.job.job_id, {"completed", "failed"}
+            )
             woke.assert_not_awaited()
-        job = await db.get_cron_job(aggregate.job.job_id)
         assert job.status == "completed"
 
     async def test_gold_price_dedupe_second_run_does_not_resend(

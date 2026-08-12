@@ -1,10 +1,13 @@
 import json
 from datetime import datetime
+from datetime import timezone as dt_timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field
 from pydantic.dataclasses import dataclass
 
+from astrbot import logger
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
@@ -73,6 +76,58 @@ def _parse_run_at(run_at: Any) -> datetime | None:
     if run_at in (None, ""):
         return None
     return datetime.fromisoformat(str(run_at))
+
+
+def _display_timezone(context: AstrAgentContext) -> tuple[str | None, ZoneInfo | None]:
+    """Resolve the configured display timezone for a cron tool call.
+
+    Args:
+        context: Current Agent context.
+
+    Returns:
+        Configured timezone name and parsed ZoneInfo, or None values when the
+        configuration is missing or invalid.
+    """
+    tz_name = str(
+        context.context.get_config(umo=context.event.unified_msg_origin).get("timezone")
+        or ""
+    ).strip()
+    if not tz_name:
+        return None, None
+    try:
+        return tz_name, ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        logger.warning(
+            "Invalid timezone %r in config, falling back to system timezone.",
+            tz_name,
+        )
+        return None, None
+
+
+def _localize_next_run(
+    next_run: datetime | None,
+    tzinfo: ZoneInfo | None,
+    fallback: datetime | None = None,
+) -> datetime | None:
+    """Convert a scheduler time to the configured display timezone.
+
+    Args:
+        next_run: Scheduler or database value, interpreted as UTC when naive.
+        tzinfo: Configured display timezone.
+        fallback: User-supplied time when the scheduler has no value yet.
+
+    Returns:
+        Localized next-run time or None.
+    """
+    if next_run is not None:
+        if next_run.tzinfo is None:
+            next_run = next_run.replace(tzinfo=dt_timezone.utc)
+        return next_run.astimezone(tzinfo) if tzinfo else next_run.astimezone()
+    if fallback is None:
+        return None
+    if fallback.tzinfo:
+        return fallback.astimezone(tzinfo) if tzinfo else fallback.astimezone()
+    return fallback.replace(tzinfo=tzinfo) if tzinfo else fallback
 
 
 def _script_tool_authorized(context: AstrAgentContext) -> tuple[bool, str]:
@@ -191,6 +246,7 @@ class ScriptTaskTool(FunctionTool[AstrAgentContext]):
         action = str(kwargs.get("action") or "").strip().lower()
         umo = context.context.event.unified_msg_origin
         sender_id = str(context.context.event.get_sender_id())
+        tz_name, tzinfo = _display_timezone(context.context)
         if action == "create":
             source = kwargs.get("source")
             if not isinstance(source, str) or not source.strip():
@@ -220,6 +276,7 @@ class ScriptTaskTool(FunctionTool[AstrAgentContext]):
                     source=source,
                     bound_umo=umo,
                     description=note or None,
+                    timezone=tz_name,
                     run_once=run_once,
                     run_at=run_at_dt,
                     creator_sender_id=sender_id,
@@ -227,7 +284,11 @@ class ScriptTaskTool(FunctionTool[AstrAgentContext]):
             except Exception as exc:  # noqa: BLE001
                 return f"error: failed to create script task: {exc}"
             job = aggregate.job
-            next_run = job.next_run_time or run_at_dt
+            next_run = _localize_next_run(
+                cron_mgr.get_next_run_time(job.job_id) or job.next_run_time,
+                tzinfo,
+                run_at_dt,
+            )
             suffix = (
                 f"one-time at {next_run}"
                 if run_once
@@ -250,11 +311,12 @@ class ScriptTaskTool(FunctionTool[AstrAgentContext]):
             if action == "get":
                 script = aggregate.script
                 job = aggregate.job
+                next_run = _localize_next_run(job.next_run_time, tzinfo)
                 return (
                     f"{job.job_id} | {job.name} | type={job.job_type} | "
                     f"enabled={job.enabled} | run_once={job.run_once} | "
                     f"cron={job.cron_expression} | run_at={job.payload.get('run_at') if isinstance(job.payload, dict) else None} | "
-                    f"next={job.next_run_time} | status={job.status} | "
+                    f"next={next_run} | status={job.status} | "
                     f"language={script.language_version} | state_keys={list((script.state or {}).keys())} "
                     f"state_size={len(json.dumps(script.state or {}, ensure_ascii=False).encode('utf-8'))}\n"
                     f"source:\n{script.source}"
@@ -341,7 +403,7 @@ class ScriptTaskTool(FunctionTool[AstrAgentContext]):
                     ):
                         continue
                 lines.append(
-                    f"{job.job_id} | {job.name} | script | run_once={job.run_once} | enabled={job.enabled} | next={job.next_run_time} | status={job.status}"
+                    f"{job.job_id} | {job.name} | script | run_once={job.run_once} | enabled={job.enabled} | next={_localize_next_run(job.next_run_time, tzinfo)} | status={job.status}"
                 )
             return "\n".join(lines) if lines else "No script tasks found."
 
@@ -433,18 +495,28 @@ class FutureTaskTool(FunctionTool[AstrAgentContext]):
                 "origin": "tool",
             }
 
+            tz_name, tzinfo = _display_timezone(context.context)
+
             try:
                 job = await cron_mgr.add_active_job(
                     name=name,
                     cron_expression=str(cron_expression) if cron_expression else None,
                     payload=payload,
                     description=note,
+                    timezone=tz_name or None,
                     run_once=run_once,
                     run_at=run_at_dt,
                 )
             except CronJobSchedulingError:
                 return "error: failed to schedule task due to invalid configuration."
-            next_run = job.next_run_time or run_at_dt
+            # add_active_job writes next_run_time to the DB via a fire-and-forget
+            # task, so job.next_run_time can still be None here; read the live
+            # value straight from the scheduler instead.
+            next_run = _localize_next_run(
+                cron_mgr.get_next_run_time(job.job_id) or job.next_run_time,
+                tzinfo,
+                run_at_dt,
+            )
             suffix = (
                 f"one-time at {next_run}"
                 if run_once
@@ -553,10 +625,12 @@ class FutureTaskTool(FunctionTool[AstrAgentContext]):
             ]
             if not jobs:
                 return "No cron jobs found."
+            _tz_name, tzinfo = _display_timezone(context.context)
             lines = []
             for j in jobs:
+                next_run = _localize_next_run(j.next_run_time, tzinfo)
                 lines.append(
-                    f"{j.job_id} | {j.name} | {j.job_type} | run_once={getattr(j, 'run_once', False)} | enabled={j.enabled} | next={j.next_run_time}"
+                    f"{j.job_id} | {j.name} | {j.job_type} | run_once={getattr(j, 'run_once', False)} | enabled={j.enabled} | next={next_run}"
                 )
             return "\n".join(lines)
 

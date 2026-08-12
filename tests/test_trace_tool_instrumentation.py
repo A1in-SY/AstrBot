@@ -22,6 +22,9 @@ from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.astr_agent_tool_exec import FunctionToolExecutor
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.provider.provider import Provider
+from astrbot.core.skills.load_skill_tool import LoadSkillTool
+from astrbot.core.tools.computer_tools.shell import ShellSessionTool
+from astrbot.core.tools.message_tools import GetGroupMessageHistoryTool
 from astrbot.core.trace.agent_instrumentation import instrument_agent_runner
 from astrbot.core.trace.context import current_trace_service
 from astrbot.core.trace.provider_instrumentation import instrument_provider
@@ -79,6 +82,14 @@ def test_mcp_tool_uses_the_distinct_mcp_operation() -> None:
     )
 
     assert _trace_tool_operation(tool) == "mcp.tool.call"
+
+
+def test_new_builtin_tools_use_the_expected_trace_operations() -> None:
+    """New built-ins must pass through ToolLoop's logical span taxonomy."""
+
+    assert _trace_tool_operation(ShellSessionTool()) == "tool.call"
+    assert _trace_tool_operation(GetGroupMessageHistoryTool()) == "tool.call"
+    assert _trace_tool_operation(LoadSkillTool()) == "skill.load"
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,9 @@ from astrbot.core import DEMO_MODE, logger
 from astrbot.core.config import VERSION
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
+from astrbot.core.dashboard_assets import (
+    get_dashboard_version,
+)
 from astrbot.core.db import BaseDatabase
 from astrbot.core.db.po import ProviderStat
 from astrbot.core.desktop_runtime import (
@@ -31,7 +34,6 @@ from astrbot.core.utils.auth_password import (
     is_default_dashboard_password,
     is_md5_dashboard_password,
 )
-from astrbot.core.utils.io import get_dashboard_dist_version, get_dashboard_version
 from astrbot.core.utils.storage_cleaner import StorageCleaner
 from astrbot.core.utils.version_comparator import VersionComparator
 from astrbot.dashboard.password_state import (
@@ -156,7 +158,7 @@ class StatService:
         dashboard_version = None
         try:
             if dashboard_static_folder:
-                dashboard_version = get_dashboard_dist_version(
+                dashboard_version = await get_dashboard_version(
                     Path(dashboard_static_folder)
                 )
             if dashboard_version is None:
