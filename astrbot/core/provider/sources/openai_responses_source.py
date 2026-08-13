@@ -12,7 +12,12 @@ from astrbot.core.agent.message import ContentPart, Message
 from astrbot.core.agent.tool import ToolSet
 from astrbot.core.exceptions import EmptyModelOutputError
 from astrbot.core.message.message_event_result import MessageChain
-from astrbot.core.provider.entities import LLMResponse, TokenUsage, ToolCallsResult
+from astrbot.core.provider.entities import (
+    LLMResponse,
+    StructuredOutputSpec,
+    TokenUsage,
+    ToolCallsResult,
+)
 
 from ..register import register_provider_adapter
 from .openai_source import ProviderOpenAIOfficial
@@ -259,6 +264,7 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
         Returns:
             The Responses payload and its chat-format source context.
         """
+        structured_output = kwargs.pop("structured_output", None)
         context_query = copy.deepcopy(self._ensure_message_to_dicts(contexts))
         if prompt is not None:
             context_query.append(
@@ -291,6 +297,16 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
         }
         if system_prompt:
             payloads["instructions"] = system_prompt
+        if isinstance(structured_output, StructuredOutputSpec):
+            payloads["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "name": structured_output.name,
+                    "description": structured_output.description,
+                    "schema": structured_output.json_schema,
+                    "strict": structured_output.strict,
+                }
+            }
 
         return payloads, context_query
 
@@ -627,6 +643,7 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
         retry_cnt: int,
         max_retries: int,
         image_fallback_used: bool = False,
+        require_image_input: bool = False,
     ) -> tuple:
         """Reuse common recovery behavior with chat-format source history.
 
@@ -656,6 +673,7 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
             retry_cnt,
             max_retries,
             image_fallback_used=image_fallback_used,
+            require_image_input=require_image_input,
         )
 
         (

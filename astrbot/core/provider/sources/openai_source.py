@@ -28,7 +28,12 @@ from astrbot.core.agent.message import (
 from astrbot.core.agent.tool import ToolSet
 from astrbot.core.exceptions import EmptyModelOutputError
 from astrbot.core.message.message_event_result import MessageChain
-from astrbot.core.provider.entities import LLMResponse, TokenUsage, ToolCallsResult
+from astrbot.core.provider.entities import (
+    LLMResponse,
+    StructuredOutputSpec,
+    TokenUsage,
+    ToolCallsResult,
+)
 from astrbot.core.utils.media_utils import (
     describe_media_ref,
     resolve_media_ref_to_base64_data,
@@ -397,6 +402,14 @@ class ProviderOpenAIOfficial(Provider):
         self.set_model(model)
 
         self.reasoning_key = "reasoning_content"
+
+    def supports_native_structured_output(self) -> bool:
+        """Return whether the adapter supports native JSON Schema output.
+
+        Returns:
+            ``True`` because schemas are mapped to ``response_format``.
+        """
+        return True
 
     def _ollama_disable_thinking_enabled(self) -> bool:
         value = self.provider_config.get("ollama_disable_thinking", False)
@@ -959,6 +972,7 @@ class ProviderOpenAIOfficial(Provider):
         **kwargs,
     ) -> tuple:
         """准备聊天所需的有效载荷和上下文"""
+        structured_output = kwargs.pop("structured_output", None)
         if contexts is None:
             contexts = []
         new_record = None
@@ -993,6 +1007,16 @@ class ProviderOpenAIOfficial(Provider):
         model = model or self.get_model()
 
         payloads = {"messages": context_query, "model": model}
+        if isinstance(structured_output, StructuredOutputSpec):
+            payloads["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": structured_output.name,
+                    "description": structured_output.description,
+                    "schema": structured_output.json_schema,
+                    "strict": structured_output.strict,
+                },
+            }
 
         self._finally_convert_payload(payloads)
 
@@ -1079,6 +1103,7 @@ class ProviderOpenAIOfficial(Provider):
         retry_cnt: int,
         max_retries: int,
         image_fallback_used: bool = False,
+        require_image_input: bool = False,
     ) -> tuple:
         """处理API错误并尝试恢复"""
         if "429" in str(e):
@@ -1118,7 +1143,11 @@ class ProviderOpenAIOfficial(Provider):
                 image_fallback_used,
             )
         if "The model is not a VLM" in str(e):  # siliconcloud
-            if image_fallback_used or not self._context_contains_image(context_query):
+            if (
+                require_image_input
+                or image_fallback_used
+                or not self._context_contains_image(context_query)
+            ):
                 raise e
             # 尝试删除所有 image
             return await self._fallback_to_text_only_and_retry(
@@ -1131,7 +1160,11 @@ class ProviderOpenAIOfficial(Provider):
                 image_fallback_used=True,
             )
         if self._is_content_moderated_upload_error(e):
-            if image_fallback_used or not self._context_contains_image(context_query):
+            if (
+                require_image_input
+                or image_fallback_used
+                or not self._context_contains_image(context_query)
+            ):
                 raise e
             return await self._fallback_to_text_only_and_retry(
                 payloads,
@@ -1143,7 +1176,11 @@ class ProviderOpenAIOfficial(Provider):
                 image_fallback_used=True,
             )
         if self._is_invalid_attachment_error(e):
-            if image_fallback_used or not self._context_contains_image(context_query):
+            if (
+                require_image_input
+                or image_fallback_used
+                or not self._context_contains_image(context_query)
+            ):
                 raise e
             return await self._fallback_to_text_only_and_retry(
                 payloads,
@@ -1198,6 +1235,7 @@ class ProviderOpenAIOfficial(Provider):
         request_max_retries: int | None = None,
         **kwargs,
     ) -> LLMResponse:
+        require_image_input = bool(kwargs.pop("require_image_input", False))
         payloads, context_query = await self._prepare_chat_payload(
             prompt,
             image_urls,
@@ -1249,6 +1287,7 @@ class ProviderOpenAIOfficial(Provider):
                     retry_cnt,
                     max_retries,
                     image_fallback_used=image_fallback_used,
+                    require_image_input=require_image_input,
                 )
                 if success:
                     break

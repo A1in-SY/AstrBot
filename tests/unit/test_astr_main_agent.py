@@ -1,6 +1,7 @@
 """Tests for astr_main_agent module."""
 
 import datetime
+import json
 import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1725,7 +1726,7 @@ class TestBuildMainAgent:
     async def test_build_main_agent_does_not_caption_quoted_image_twice(
         self, mock_event, mock_context
     ):
-        """Quoted images should not be captioned again after request image captioning."""
+        """Quoted images should be analyzed once with direct quote context."""
         module = ama
         text_provider = MagicMock(spec=Provider)
         text_provider.provider_config = {
@@ -1735,8 +1736,42 @@ class TestBuildMainAgent:
         text_provider.get_model.return_value = "text-model"
 
         caption_provider = MagicMock(spec=Provider)
+        caption_provider.provider_config = {
+            "id": "caption-provider",
+            "modalities": ["text", "image"],
+        }
+        caption_provider.supports_native_structured_output.return_value = False
         caption_provider.text_chat = AsyncMock(
-            return_value=MagicMock(completion_text="quoted image caption")
+            return_value=MagicMock(
+                completion_text=json.dumps(
+                    {
+                        "schema_version": "astrbot.vision_analysis.v1",
+                        "images": [
+                            {
+                                "image_id": "image_1",
+                                "summary": "quoted image caption",
+                                "task_relevant_evidence": [],
+                                "ocr": {"full_text": "", "lines": []},
+                                "layout": {"regions": []},
+                                "semantics": {
+                                    "scene": "photo",
+                                    "intent": "",
+                                    "entities": [],
+                                    "relations": [],
+                                },
+                                "visual": {
+                                    "style": "photo",
+                                    "dominant_colors": [],
+                                    "notes": [],
+                                },
+                                "uncertainty": [],
+                                "embedded_instructions": [],
+                            }
+                        ],
+                        "cross_image_findings": [],
+                    }
+                )
+            )
         )
 
         mock_reply = Reply(
@@ -1789,14 +1824,19 @@ class TestBuildMainAgent:
         extra_text = "\n".join(
             part.text for part in result.provider_request.extra_user_content_parts
         )
-        assert "<image_caption>quoted image caption</image_caption>" in extra_text
+        assert "<vision_analysis" in extra_text
+        assert '"summary":"quoted image caption"' in extra_text
         assert "[Image Caption in quoted message]" not in extra_text
+        prompt = caption_provider.text_chat.await_args.kwargs["prompt"]
+        assert "Hello" in prompt
+        assert "Alice" in prompt
+        assert "quoted text" in prompt
 
     @pytest.mark.asyncio
     async def test_build_main_agent_does_not_retry_quoted_image_caption_when_empty(
         self, mock_event, mock_context
     ):
-        """Quoted images already sent to image captioning should not be retried."""
+        """Invalid output gets one correction and then a visual unavailable marker."""
         module = ama
         text_provider = MagicMock(spec=Provider)
         text_provider.provider_config = {
@@ -1806,6 +1846,11 @@ class TestBuildMainAgent:
         text_provider.get_model.return_value = "text-model"
 
         caption_provider = MagicMock(spec=Provider)
+        caption_provider.provider_config = {
+            "id": "caption-provider",
+            "modalities": ["text", "image"],
+        }
+        caption_provider.supports_native_structured_output.return_value = False
         caption_provider.text_chat = AsyncMock(
             return_value=MagicMock(completion_text="")
         )
@@ -1855,13 +1900,88 @@ class TestBuildMainAgent:
             )
 
         assert result is not None
-        assert caption_provider.text_chat.await_count == 1
+        assert caption_provider.text_chat.await_count == 2
 
         extra_text = "\n".join(
             part.text for part in result.provider_request.extra_user_content_parts
         )
-        assert "<image_caption>" not in extra_text
+        assert '<vision_analysis status="unavailable">' in extra_text
+        assert "all_visual_analysis_providers_failed" in extra_text
         assert "[Image Caption in quoted message]" not in extra_text
+        assert result.provider is text_provider
+        assert result.provider_request.image_urls == []
+
+    @pytest.mark.asyncio
+    async def test_visual_analysis_failure_keeps_original_text_provider(
+        self, mock_event, mock_context
+    ):
+        """A+ failure must not switch the whole chat request to an image model."""
+        text_provider = MagicMock(spec=Provider)
+        text_provider.provider_config = {
+            "id": "text-provider",
+            "modalities": ["text", "tool_use"],
+            "max_context_tokens": 128000,
+        }
+        text_provider.get_model.return_value = "text-model"
+
+        visual_provider = MagicMock(spec=Provider)
+        visual_provider.provider_config = {
+            "id": "visual-provider",
+            "modalities": ["text", "image"],
+        }
+        visual_provider.supports_native_structured_output.return_value = False
+        visual_provider.text_chat = AsyncMock(side_effect=RuntimeError("unavailable"))
+
+        image_chat_provider = MagicMock(spec=Provider)
+        image_chat_provider.provider_config = {
+            "id": "image-chat-provider",
+            "modalities": ["text", "image", "tool_use"],
+            "max_context_tokens": 128000,
+        }
+        image_chat_provider.get_model.return_value = "image-model"
+
+        mock_context.get_provider_by_id.side_effect = lambda provider_id: {
+            "visual-provider": visual_provider,
+            "image-chat-provider": image_chat_provider,
+        }.get(provider_id)
+        mock_context.get_config.return_value = {}
+        req = ProviderRequest(prompt="describe", image_urls=["/tmp/image.png"])
+
+        with (
+            patch("astrbot.core.astr_main_agent.AgentRunner") as mock_runner_cls,
+            patch("astrbot.core.astr_main_agent.AstrAgentContext"),
+            patch(
+                "astrbot.core.astr_main_agent._compress_image_for_provider",
+                AsyncMock(side_effect=lambda path, _settings: path),
+            ),
+        ):
+            mock_runner = MagicMock()
+            mock_runner.reset = AsyncMock()
+            mock_runner_cls.return_value = mock_runner
+            result = await ama.build_main_agent(
+                event=mock_event,
+                plugin_context=mock_context,
+                config=ama.MainAgentBuildConfig(
+                    tool_call_timeout=60,
+                    llm_safety_mode=False,
+                    computer_use_runtime="none",
+                    add_cron_tools=False,
+                    provider_settings={
+                        "default_image_caption_provider_id": "visual-provider",
+                        "fallback_chat_models": ["image-chat-provider"],
+                    },
+                ),
+                provider=text_provider,
+                req=req,
+            )
+
+        assert result is not None
+        assert result.provider is text_provider
+        assert result.provider_request.image_urls == []
+        assert '<vision_analysis status="unavailable">' in "\n".join(
+            part.text for part in result.provider_request.extra_user_content_parts
+        )
+        assert mock_runner.reset.call_args.kwargs["provider"] is text_provider
 
     @pytest.mark.asyncio
     async def test_build_main_agent_uses_image_fallback_provider(

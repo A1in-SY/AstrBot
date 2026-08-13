@@ -5,6 +5,7 @@ from astrbot.core.provider.entities import (
     ProviderMetaData,
     ProviderRequest,
     ProviderType,
+    StructuredOutputSpec,
 )
 
 __all__ = [
@@ -15,4 +16,5 @@ __all__ = [
     "ProviderRequest",
     "ProviderType",
     "STTProvider",
+    "StructuredOutputSpec",
 ]

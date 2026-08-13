@@ -105,6 +105,11 @@ DEFAULT_CONFIG = {
         "fallback_chat_models": [],
         "request_max_retries": 5,
         "default_image_caption_provider_id": "",
+        "image_caption_fallback_provider_ids": [],
+        "image_caption_native_structured_output": False,
+        "image_analysis_extra_focus": "",
+        # Deprecated compatibility key. The A+ visual analysis contract does not
+        # allow replacing its fixed safety and evidence prompt.
         "image_caption_prompt": "Please describe the image using Chinese.",
         "provider_pool": ["*"],  # "*" 表示使用所有可用的提供者
         "wake_prefix": "",
@@ -2899,6 +2904,19 @@ CONFIG_METADATA_2 = {
                     "request_max_retries": {
                         "type": "int",
                     },
+                    "default_image_caption_provider_id": {
+                        "type": "string",
+                    },
+                    "image_caption_fallback_provider_ids": {
+                        "type": "list",
+                        "items": {"type": "string"},
+                    },
+                    "image_caption_native_structured_output": {
+                        "type": "bool",
+                    },
+                    "image_analysis_extra_focus": {
+                        "type": "string",
+                    },
                     "wake_prefix": {
                         "type": "string",
                     },
@@ -3039,9 +3057,6 @@ CONFIG_METADATA_2 = {
                         "type": "bool",
                     },
                     "image_caption_provider_id": {
-                        "type": "string",
-                    },
-                    "image_caption_prompt": {
                         "type": "string",
                     },
                     "group_message_history_enable": {
@@ -3262,10 +3277,27 @@ CONFIG_METADATA_3 = {
                         "hint": "单次模型请求遇到可重试错误时的最大尝试次数。",
                     },
                     "provider_settings.default_image_caption_provider_id": {
-                        "description": "默认图片转述模型",
+                        "description": "默认视觉分析模型",
                         "type": "string",
                         "_special": "select_provider",
-                        "hint": "留空代表不使用，可用于非多模态模型",
+                        "hint": "为不支持图片的主模型生成结构化视觉证据；留空代表不启用 A+ 视觉分析。",
+                    },
+                    "provider_settings.image_caption_fallback_provider_ids": {
+                        "description": "回退视觉分析模型列表",
+                        "type": "list",
+                        "items": {"type": "string"},
+                        "_special": "select_providers",
+                        "hint": "主视觉分析模型失败或输出不符合 Schema 时，按顺序切换。群聊上下文也使用该列表。",
+                    },
+                    "provider_settings.image_caption_native_structured_output": {
+                        "description": "视觉分析使用原生严格 JSON Schema",
+                        "type": "bool",
+                        "hint": "默认关闭。开启后，仅使用已适配原生结构化输出的提供商；不支持或被服务端拒绝时直接尝试下一个视觉模型。无论是否开启，AstrBot 都会执行本地 Schema 校验。",
+                    },
+                    "provider_settings.image_analysis_extra_focus": {
+                        "description": "视觉分析额外关注点",
+                        "type": "text",
+                        "hint": "仅用于主 Agent 的任务型视觉分析，并与用户当前任务一起注入。不能覆盖固定的安全、证据和 Schema 契约。群聊上下文不会使用此项。",
                     },
                     "provider_stt_settings.enable": {
                         "description": "启用语音转文本",
@@ -3301,10 +3333,6 @@ CONFIG_METADATA_3 = {
                         "condition": {
                             "provider_tts_settings.enable": True,
                         },
-                    },
-                    "provider_settings.image_caption_prompt": {
-                        "description": "图片转述提示词",
-                        "type": "text",
                     },
                 },
                 "condition": {
@@ -4329,18 +4357,18 @@ CONFIG_METADATA_3 = {
                         },
                     },
                     "provider_ltm_settings.image_caption": {
-                        "description": "自动理解图片",
+                        "description": "自动分析图片",
                         "type": "bool",
-                        "hint": "需要设置群聊图片转述模型。",
+                        "hint": "消息收集时立即使用通用提示词生成结构化视觉证据，不注入当前对话任务。需要配置群聊或默认视觉分析模型。",
                         "condition": {
                             "provider_ltm_settings.group_icl_enable": True,
                         },
                     },
                     "provider_ltm_settings.image_caption_provider_id": {
-                        "description": "群聊图片转述模型",
+                        "description": "群聊首选视觉分析模型",
                         "type": "string",
                         "_special": "select_provider",
-                        "hint": "用于群聊记录注入上下文的图片理解，与默认图片转述模型分开配置。",
+                        "hint": "可留空并使用默认视觉分析模型。配置后将优先使用它，然后依次尝试默认模型和回退视觉分析模型列表。",
                         "condition": {
                             "provider_ltm_settings.group_icl_enable": True,
                             "provider_ltm_settings.image_caption": True,

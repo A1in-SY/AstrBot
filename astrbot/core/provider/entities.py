@@ -48,6 +48,23 @@ class ProviderMeta:
     """the capability type of the provider adapter"""
 
 
+@dataclass(frozen=True, slots=True)
+class StructuredOutputSpec:
+    """Provider-neutral native structured output request.
+
+    Args:
+        name: Stable schema name sent to the upstream provider.
+        description: Human-readable description of the expected output.
+        json_schema: JSON Schema that the provider must enforce.
+        strict: Whether the provider should enforce exact schema adherence.
+    """
+
+    name: str
+    description: str
+    json_schema: dict[str, Any]
+    strict: bool = True
+
+
 @dataclass
 class ProviderMetaData(ProviderMeta):
     """The metadata of a provider adapter for registration."""
@@ -114,6 +131,8 @@ class ProviderRequest:
     """附加的上次请求后工具调用的结果。参考: https://platform.openai.com/docs/guides/function-calling#handling-function-calls"""
     model: str | None = None
     """模型名称，为 None 时使用提供商的默认模型"""
+    image_sources: list[str] = field(default_factory=list)
+    """与 image_urls 对齐的请求内来源标记，用于结构化视觉分析。"""
 
     def __repr__(self) -> str:
         return (
