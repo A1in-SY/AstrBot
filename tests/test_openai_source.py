@@ -213,6 +213,46 @@ async def test_handle_api_error_content_moderated_removes_images():
 
 
 @pytest.mark.asyncio
+async def test_handle_api_error_preserves_required_image_evidence() -> None:
+    provider = _make_provider(
+        {"image_moderation_error_patterns": ["file:content-moderated"]}
+    )
+    try:
+        payloads = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "analyze"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/jpeg;base64,abcd"},
+                        },
+                    ],
+                }
+            ]
+        }
+        context_query = payloads["messages"]
+
+        with pytest.raises(Exception, match="content-moderated"):
+            await provider._handle_api_error(
+                Exception("Content is moderated [WKE=file:content-moderated]"),
+                payloads=payloads,
+                context_query=context_query,
+                func_tool=None,
+                chosen_key="test-key",
+                available_api_keys=["test-key"],
+                retry_cnt=0,
+                max_retries=10,
+                require_image_input=True,
+            )
+
+        assert payloads["messages"][0]["content"][1]["type"] == "image_url"
+    finally:
+        await provider.terminate()
+
+
+@pytest.mark.asyncio
 async def test_handle_api_error_model_not_vlm_removes_images_and_retries_text_only():
     provider = _make_provider()
     try:

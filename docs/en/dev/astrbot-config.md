@@ -54,7 +54,9 @@ The default AstrBot configuration is as follows:
         "enable": True,
         "default_provider_id": "",
         "default_image_caption_provider_id": "",
-        "image_caption_prompt": "Please describe the image using Chinese.",
+        "image_caption_fallback_provider_ids": [],
+        "image_caption_native_structured_output": False,
+        "image_analysis_extra_focus": "",
         "provider_pool": ["*"],  # "*" means use all available providers
         "wake_prefix": "",
         "web_search": False,
@@ -275,13 +277,23 @@ Default conversation model provider ID. Must be a provider ID already configured
 
 #### `provider_settings.default_image_caption_provider_id`
 
-Default image captioning model provider ID. Must be a provider ID already configured in the `provider` list. If empty, image captioning is disabled.
+Default visual analysis provider ID. It must reference a configured provider that supports image input. If empty, A+ visual analysis is disabled.
 
-This means when a user sends an image, AstrBot uses this provider to generate a text description, which is then used as part of the conversation context. This is useful when the conversation model doesn't support multimodal input.
+When the main model cannot read images, AstrBot sends all images in the request to this provider as a batch, injects the current user task and direct quoted-message text, and requires one locally schema-validated result per image. The complete validated result is persisted in conversation context.
 
-#### `provider_settings.image_caption_prompt`
+#### `provider_settings.image_caption_fallback_provider_ids`
 
-Prompt template for image captioning. Default is `"Please describe the image using Chinese."`.
+Ordered visual analysis fallback providers. AstrBot moves through this list when the primary provider fails, returns invalid JSON, violates the schema, or omits image IDs. If an otherwise valid multi-image batch only omits some images, AstrBot first retries only those images individually.
+
+#### `provider_settings.image_caption_native_structured_output`
+
+Whether to require provider-native strict JSON Schema output. Default is `false`. When enabled, adapters without native structured-output support are skipped. A provider rejection also moves to the next visual provider without downgrading that same request. Local Schema validation always runs.
+
+#### `provider_settings.image_analysis_extra_focus`
+
+Additional focus for task-aware Main Agent visual analysis. It cannot override the fixed safety, evidence, or Schema contract. AstrBot still injects the current user task and direct quoted-message text. This setting is not injected into generic group-context analysis.
+
+The legacy `provider_settings.image_caption_prompt` key remains only for configuration compatibility and is ignored by A+ visual analysis.
 
 #### `provider_settings.provider_pool`
 
@@ -464,7 +476,7 @@ Maximum number of group chat messages retained for context injection. Default is
 
 #### `provider_ltm_settings.image_caption`
 
-Whether to automatically describe group chat images and inject the descriptions into context. Default is `false`. This only applies when group chat record injection is enabled. Use with caution as it can significantly increase API calls and token usage.
+Whether to analyze group images immediately when messages are collected and inject generic structured visual evidence into later group context. Default is `false`, and it only applies when group-context injection is enabled. This path does not inject a current task, quoted text, or additional focus. Multiple images in one group message are analyzed as one batch. If the group-specific provider is empty, the default visual provider is used; the visual fallback list is shared. Use with caution because this can increase API and token usage.
 
 #### `provider_ltm_settings.active_reply`
 

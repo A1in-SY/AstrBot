@@ -17,7 +17,11 @@ from astrbot.api.provider import Provider
 from astrbot.core.agent.message import AudioURLPart, ContentPart, ImageURLPart, TextPart
 from astrbot.core.exceptions import EmptyModelOutputError
 from astrbot.core.message.message_event_result import MessageChain
-from astrbot.core.provider.entities import LLMResponse, TokenUsage
+from astrbot.core.provider.entities import (
+    LLMResponse,
+    StructuredOutputSpec,
+    TokenUsage,
+)
 from astrbot.core.provider.func_tool_manager import ToolSet
 from astrbot.core.utils.media_utils import (
     describe_media_ref,
@@ -57,6 +61,14 @@ class ProviderGoogleGenAI(Provider):
         "BLOCK_MEDIUM_AND_ABOVE": types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
         "BLOCK_LOW_AND_ABOVE": types.HarmBlockThreshold.BLOCK_LOW_AND_ABOVE,
     }
+
+    def supports_native_structured_output(self) -> bool:
+        """Return whether the adapter supports native JSON Schema output.
+
+        Returns:
+            ``True`` because schemas are mapped to Gemini response settings.
+        """
+        return True
 
     def __init__(
         self,
@@ -280,6 +292,16 @@ class ProviderGoogleGenAI(Provider):
             logprobs=payloads.get("logprobs"),
             seed=payloads.get("seed"),
             response_modalities=modalities,
+            response_mime_type=(
+                "application/json"
+                if isinstance(payloads.get("structured_output"), StructuredOutputSpec)
+                else None
+            ),
+            response_json_schema=(
+                payloads["structured_output"].json_schema
+                if isinstance(payloads.get("structured_output"), StructuredOutputSpec)
+                else None
+            ),
             tools=cast(types.ToolListUnion | None, tool_list),
             tool_config=tool_config,
             safety_settings=self.safety_settings if self.safety_settings else None,
@@ -829,6 +851,7 @@ class ProviderGoogleGenAI(Provider):
         request_max_retries: int | None = None,
         **kwargs,
     ) -> LLMResponse:
+        structured_output = kwargs.pop("structured_output", None)
         if contexts is None:
             contexts = []
         new_record = None
@@ -860,6 +883,8 @@ class ProviderGoogleGenAI(Provider):
         model = model or self.get_model()
 
         payloads = {"messages": context_query, "model": model}
+        if isinstance(structured_output, StructuredOutputSpec):
+            payloads["structured_output"] = structured_output
         if func_tool and not func_tool.empty():
             payloads["tool_choice"] = tool_choice
 

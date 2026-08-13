@@ -611,6 +611,7 @@ async def test_responses_public_retry_stays_within_one_trace(monkeypatch, tmp_pa
         _retry_cnt,
         _max_retries,
         image_fallback_used=False,
+        require_image_input=False,
     ):
         return (
             False,

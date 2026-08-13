@@ -54,7 +54,9 @@ AstrBot 默认配置如下：
         "enable": True,
         "default_provider_id": "",
         "default_image_caption_provider_id": "",
-        "image_caption_prompt": "Please describe the image using Chinese.",
+        "image_caption_fallback_provider_ids": [],
+        "image_caption_native_structured_output": False,
+        "image_analysis_extra_focus": "",
         "provider_pool": ["*"],  # "*" 表示使用所有可用的提供者
         "wake_prefix": "",
         "web_search": False,
@@ -275,13 +277,23 @@ ID 白名单。填写后，将只处理所填写的 ID 发来的消息事件。�
 
 #### `provider_settings.default_image_caption_provider_id`
 
-默认的图像描述模型提供商 ID。必须是 `provider` 列表中已配置的提供商 ID。如果为空，则代表不使用图像描述功能。
+默认的视觉分析模型提供商 ID。必须是 `provider` 列表中已配置且支持图片输入的提供商 ID。如果为空，则代表不启用 A+ 视觉分析。
 
-此配置项的意思是，当用户发送一张图片时，AstrBot 会使用此提供商来生成对图片的描述文本，并将描述文本作为对话的上下文之一。这在对话模型不支持多模态输入时特别有用。
+当当前主模型不支持图片时，AstrBot 会把同一条请求中的图片批量交给该模型，注入用户当前任务与直接引用文本，并要求逐图返回经过本地 Schema 校验的结构化证据。完整的校验结果会作为对话上下文保存。
 
-#### `provider_settings.image_caption_prompt`
+#### `provider_settings.image_caption_fallback_provider_ids`
 
-图像描述的提示词模板。默认为 `"Please describe the image using Chinese."`。
+视觉分析模型的有序回退列表。主视觉模型请求失败、输出无法解析、Schema 校验失败或图片 ID 不完整时，AstrBot 会按顺序尝试这些模型。多图批量结果只缺少个别图片时，会先对缺失图片做单图补偿。
+
+#### `provider_settings.image_caption_native_structured_output`
+
+是否要求视觉分析提供商使用原生严格 JSON Schema 输出。默认为 `false`。开启后，不支持原生结构化输出的适配器会被跳过；服务端拒绝严格输出时也会直接进入下一个视觉模型，不在同一模型上降级。无论此项是否开启，AstrBot 都会执行本地 Schema 校验。
+
+#### `provider_settings.image_analysis_extra_focus`
+
+主 Agent 视觉分析的额外关注点。固定的安全、证据和 Schema 契约不可覆盖；AstrBot 仍会自动注入用户当前任务与直接引用文本。此配置不会注入群聊上下文的通用视觉分析。
+
+旧的 `provider_settings.image_caption_prompt` 仅作为配置兼容字段保留，A+ 视觉分析不再使用它。
 
 #### `provider_settings.provider_pool`
 
@@ -464,7 +476,7 @@ Added in `v4.3.5`
 
 #### `provider_ltm_settings.image_caption`
 
-是否自动使用群聊图片转述模型生成图片描述并注入上下文。默认为 `false`。仅在群聊记录注入上下文开启时生效。请谨慎使用，因为这可能会增加大量的 API 调用和 token 开销。
+是否在群消息收集时立即使用 A+ 内核生成通用结构化视觉证据并注入后续群聊上下文。默认为 `false`，仅在群聊记录注入上下文开启时生效。它不会注入当前对话任务、引用文本或额外关注点；同一条群消息的多张图片会批量分析。群聊首选模型为空时使用默认视觉分析模型，并共享视觉分析回退列表。请谨慎使用，因为这可能增加 API 调用和 token 开销。
 
 #### `provider_ltm_settings.active_reply`
 

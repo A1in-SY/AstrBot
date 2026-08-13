@@ -74,6 +74,15 @@ class Provider(AbstractProvider):
         super().__init__(provider_config)
         self.provider_settings = provider_settings
 
+    def supports_native_structured_output(self) -> bool:
+        """Return whether this adapter can request native JSON Schema output.
+
+        Returns:
+            ``True`` when ``structured_output`` is mapped to an upstream native
+            structured-output parameter. Third-party adapters remain opt-in.
+        """
+        return False
+
     @abc.abstractmethod
     def get_current_key(self) -> str:
         raise NotImplementedError
@@ -122,6 +131,7 @@ class Provider(AbstractProvider):
             tool_calls_result: 回传给 LLM 的工具调用结果。参考: https://platform.openai.com/docs/guides/function-calling
             extra_user_content_parts: 额外的内容块列表，用于在用户消息后添加额外的文本块（如系统提醒、指令等）
             request_max_retries: 可重试请求错误的最大尝试次数，包含首次请求。
+            structured_output: 可选的原生严格结构化输出约束。
             kwargs: 其他参数
 
         Notes:

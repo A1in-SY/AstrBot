@@ -14,7 +14,11 @@ from astrbot import logger
 from astrbot.api.provider import Provider
 from astrbot.core.agent.message import AudioURLPart, ContentPart, ImageURLPart, TextPart
 from astrbot.core.exceptions import EmptyModelOutputError
-from astrbot.core.provider.entities import LLMResponse, TokenUsage
+from astrbot.core.provider.entities import (
+    LLMResponse,
+    StructuredOutputSpec,
+    TokenUsage,
+)
 from astrbot.core.provider.func_tool_manager import ToolSet
 from astrbot.core.utils.media_utils import (
     describe_media_ref,
@@ -36,6 +40,14 @@ from .request_retry import retry_provider_request, retry_provider_request_contex
 )
 class ProviderAnthropic(Provider):
     _PROMPT_CACHE_CONTROL = {"type": "ephemeral"}
+
+    def supports_native_structured_output(self) -> bool:
+        """Return whether the adapter supports native JSON Schema output.
+
+        Returns:
+            ``True`` because schemas are mapped to ``output_config``.
+        """
+        return True
 
     @staticmethod
     def _ensure_usable_response(
@@ -760,6 +772,7 @@ class ProviderAnthropic(Provider):
         request_max_retries: int | None = None,
         **kwargs,
     ) -> LLMResponse:
+        structured_output = kwargs.pop("structured_output", None)
         if contexts is None:
             contexts = []
         new_record = None
@@ -794,6 +807,13 @@ class ProviderAnthropic(Provider):
         model = model or self.get_model()
 
         payloads = {"messages": new_messages, "model": model}
+        if isinstance(structured_output, StructuredOutputSpec):
+            payloads["output_config"] = {
+                "format": {
+                    "type": "json_schema",
+                    "schema": structured_output.json_schema,
+                }
+            }
         if func_tool and not func_tool.empty():
             payloads["tool_choice"] = tool_choice
 
