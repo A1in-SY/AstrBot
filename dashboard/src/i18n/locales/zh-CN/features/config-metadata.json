@@ -35,7 +35,7 @@
     },
     "ai": {
       "description": "模型",
-      "hint": "当使用非内置 Agent 执行器时,默认对话模型和默认图片转述模型可能会无效,但某些插件会依赖此配置项来调用 AI 能力。",
+      "hint": "当使用非内置 Agent 执行器时，默认对话模型和默认视觉分析模型可能不会生效，但某些插件仍会依赖这些配置调用 AI 能力。",
       "provider_settings": {
         "default_provider_id": {
           "description": "默认对话模型",
@@ -50,11 +50,24 @@
           "hint": "单次模型请求遇到可重试错误时的最大尝试次数。"
         },
         "default_image_caption_provider_id": {
-          "description": "默认图片转述模型",
-          "hint": "留空代表不使用,可用于非多模态模型"
+          "description": "默认视觉分析模型",
+          "hint": "为不支持图片输入的主模型生成结构化视觉证据；留空代表不启用 A+ 视觉分析。"
+        },
+        "image_caption_fallback_provider_ids": {
+          "description": "回退视觉分析模型列表",
+          "hint": "主视觉分析模型失败、输出无法解析或不符合 Schema 时，按顺序切换；群聊上下文也使用该列表。"
+        },
+        "image_caption_native_structured_output": {
+          "description": "使用原生严格 JSON Schema",
+          "hint": "默认关闭。开启后仅使用已适配原生结构化输出的视觉模型；提供商不支持或拒绝严格输出时直接尝试下一个模型。本地 Schema 校验始终执行。"
+        },
+        "image_analysis_extra_focus": {
+          "description": "视觉分析额外关注点",
+          "hint": "仅用于主 Agent 的任务型视觉分析，并与用户当前任务一起注入。不能覆盖固定的安全、证据和 Schema 契约；群聊上下文不会使用此项。"
         },
         "image_caption_prompt": {
-          "description": "图片转述提示词"
+          "description": "旧图片转述提示词（已废弃）",
+          "hint": "仅为兼容旧配置保留；A+ 视觉分析不会使用它，也不允许它覆盖固定的安全、证据和 Schema 契约。"
         }
       },
       "provider_stt_settings": {
@@ -194,7 +207,12 @@
       "provider_settings": {
         "computer_use_runtime": {
           "description": "运行环境",
-          "hint": "允许 Agent 访问的环境。local 为本机环境，sandbox 为沙箱环境，none 为不允许任何环境。"
+          "hint": "允许 Agent 访问的环境。local 为本机环境，sandbox 为沙箱环境，none 为不允许任何环境。",
+          "labels": [
+            "无",
+            "本地",
+            "沙箱"
+          ]
         },
         "computer_use_require_admin": {
           "description": "需要 AstrBot 管理员权限",
@@ -202,7 +220,12 @@
         },
         "sandbox": {
           "booter": {
-            "description": "沙箱环境驱动器"
+            "description": "沙箱环境驱动器",
+            "labels": [
+              "Shipyard Neo",
+              "Shipyard",
+              "CUA"
+            ]
           },
           "shipyard_neo_endpoint": {
             "description": "Shipyard Neo API Endpoint",
@@ -226,7 +249,13 @@
           },
           "cua_os_type": {
             "description": "CUA 操作系统类型",
-            "hint": "CUA 沙箱操作系统类型，默认 linux。"
+            "hint": "CUA 沙箱操作系统类型，默认 linux。",
+            "labels": [
+              "Linux",
+              "macOS",
+              "Windows",
+              "Android"
+            ]
           },
           "cua_idle_timeout": {
             "description": "CUA 空闲超时(秒)",
@@ -1023,12 +1052,12 @@
           "description": "注入上下文最大消息数量"
         },
         "image_caption": {
-          "description": "自动理解图片",
-          "hint": "需要设置群聊图片转述模型。"
+          "description": "自动分析图片",
+          "hint": "消息收集时立即使用通用提示生成结构化视觉证据，不注入当前对话任务。需要配置群聊或默认视觉分析模型。"
         },
         "image_caption_provider_id": {
-          "description": "群聊图片转述模型",
-          "hint": "用于群聊记录注入上下文的图片理解，与默认图片转述模型分开配置。"
+          "description": "群聊首选视觉分析模型",
+          "hint": "可留空并使用默认视觉分析模型。配置后将优先使用它，然后依次尝试默认模型和回退视觉分析模型列表。"
         },
         "group_message_history_enable": {
           "description": "持久化群聊消息记录",
