@@ -9,7 +9,11 @@ from pathlib import Path
 import pytest
 
 from astrbot.core.config.astrbot_config import AstrBotConfig, RateLimitStrategy
-from astrbot.core.config.default import CONFIG_METADATA_3_SYSTEM, DEFAULT_VALUE_MAP
+from astrbot.core.config.default import (
+    CONFIG_METADATA_3,
+    CONFIG_METADATA_3_SYSTEM,
+    DEFAULT_VALUE_MAP,
+)
 from astrbot.core.config.i18n_utils import ConfigMetadataI18n
 from astrbot.core.utils.auth_password import (
     DEFAULT_DASHBOARD_PASSWORD,
@@ -1064,10 +1068,16 @@ class TestConfigMetadataI18n:
             == "group.section.field.name"
         )
 
+    @pytest.mark.parametrize(
+        "metadata",
+        [CONFIG_METADATA_3, CONFIG_METADATA_3_SYSTEM],
+        ids=["core", "system"],
+    )
     @pytest.mark.parametrize("locale", ["zh-CN", "en-US", "ru-RU"])
-    def test_system_metadata_i18n_keys_resolve_for_every_locale(self, locale):
-        """Every CONFIG_METADATA_3_SYSTEM key must resolve in each locale."""
-        converted = ConfigMetadataI18n.convert_to_i18n_keys(CONFIG_METADATA_3_SYSTEM)
+    def test_metadata_i18n_keys_resolve_for_every_locale(self, metadata, locale):
+        """Every core configuration metadata key must resolve in each locale."""
+        converted = ConfigMetadataI18n.convert_to_i18n_keys(metadata)
+        group_prefixes = tuple(f"{group}." for group in metadata)
         keys: set[str] = set()
 
         def collect(value):
@@ -1077,7 +1087,7 @@ class TestConfigMetadataI18n:
             elif isinstance(value, list):
                 for item in value:
                     collect(item)
-            elif isinstance(value, str) and value.startswith("system_group."):
+            elif isinstance(value, str) and value.startswith(group_prefixes):
                 keys.add(value)
 
         collect(converted)

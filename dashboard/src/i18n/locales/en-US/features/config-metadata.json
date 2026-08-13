@@ -35,7 +35,7 @@
     },
     "ai": {
       "description": "Model",
-      "hint": "When using non-built-in Agent runners, the default chat model and default image caption model may not take effect, but some plugins rely on these settings to invoke AI capabilities.",
+      "hint": "When using a non-built-in Agent runner, the default chat and visual analysis models may not take effect, although some plugins still rely on these settings to invoke AI capabilities.",
       "provider_settings": {
         "default_provider_id": {
           "description": "Default Chat Model",
@@ -50,11 +50,24 @@
           "hint": "Maximum attempts for a single model request when retryable errors occur."
         },
         "default_image_caption_provider_id": {
-          "description": "Default Image Caption Model",
-          "hint": "Leave empty to disable; useful for non-multimodal models"
+          "description": "Default Visual Analysis Model",
+          "hint": "Generates structured visual evidence for main models without image input; leave empty to disable A+ visual analysis."
+        },
+        "image_caption_fallback_provider_ids": {
+          "description": "Fallback Visual Analysis Models",
+          "hint": "Tried in order when the primary visual model fails, returns unparseable output, or violates the schema. Group context analysis also uses this list."
+        },
+        "image_caption_native_structured_output": {
+          "description": "Use Native Strict JSON Schema",
+          "hint": "Disabled by default. When enabled, only visual providers adapted for native structured output are used; unsupported or rejected strict output moves directly to the next model. Local schema validation always runs."
+        },
+        "image_analysis_extra_focus": {
+          "description": "Additional Visual Analysis Focus",
+          "hint": "Used only for task-aware Main Agent analysis and injected alongside the current user task. It cannot override the fixed safety, evidence, or schema contract and is not used for generic group context analysis."
         },
         "image_caption_prompt": {
-          "description": "Image Caption Prompt"
+          "description": "Legacy Image Caption Prompt (Deprecated)",
+          "hint": "Retained only for configuration compatibility. A+ visual analysis ignores it and does not allow it to override the fixed safety, evidence, or schema contract."
         }
       },
       "provider_stt_settings": {
@@ -91,6 +104,7 @@
     },
     "knowledgebase": {
       "description": "Knowledge Base",
+      "hint": "AstrBot's external brain.",
       "kb_names": {
         "description": "Knowledge Base List",
         "hint": "Supports multiple selections"
@@ -110,6 +124,7 @@
     },
     "websearch": {
       "description": "Web Search",
+      "hint": "Give AstrBot access to the internet and current information.",
       "provider_settings": {
         "web_search": {
           "description": "Enable Web Search"
@@ -192,7 +207,12 @@
       "provider_settings": {
         "computer_use_runtime": {
           "description": "Computer Use Runtime",
-          "hint": "Environment allowed for Agent usage. `local` means the local machine environment, `sandbox` means the sandbox environment, and `none` means no environment is allowed."
+          "hint": "Environment allowed for Agent usage. `local` means the local machine environment, `sandbox` means the sandbox environment, and `none` means no environment is allowed.",
+          "labels": [
+            "None",
+            "Local",
+            "Sandbox"
+          ]
         },
         "computer_use_require_admin": {
           "description": "Require AstrBot Admin Permission",
@@ -200,7 +220,12 @@
         },
         "sandbox": {
           "booter": {
-            "description": "Sandbox Environment Driver"
+            "description": "Sandbox Environment Driver",
+            "labels": [
+              "Shipyard Neo",
+              "Shipyard",
+              "CUA"
+            ]
           },
           "shipyard_neo_endpoint": {
             "description": "Shipyard Neo API Endpoint",
@@ -224,7 +249,13 @@
           },
           "cua_os_type": {
             "description": "CUA OS Type",
-            "hint": "CUA sandbox operating system type. Defaults to linux."
+            "hint": "CUA sandbox operating system type. Defaults to linux.",
+            "labels": [
+              "Linux",
+              "macOS",
+              "Windows",
+              "Android"
+            ]
           },
           "cua_idle_timeout": {
             "description": "CUA Idle Timeout",
@@ -1021,12 +1052,12 @@
           "description": "Maximum Messages Injected into Context"
         },
         "image_caption": {
-          "description": "Auto-understand Images",
-          "hint": "Requires setting a group chat image caption model."
+          "description": "Automatically Analyze Images",
+          "hint": "Immediately generates structured visual evidence with a general prompt as messages are collected, without injecting the current conversation task. Requires a group-specific or default visual analysis model."
         },
         "image_caption_provider_id": {
-          "description": "Group Chat Image Caption Model",
-          "hint": "Used to understand images injected from group chat records, configured separately from the default image caption model."
+          "description": "Preferred Group Visual Analysis Model",
+          "hint": "May be left empty to use the default visual analysis model. When configured, it is tried first, followed by the default model and the fallback visual analysis model list."
         },
         "group_message_history_enable": {
           "description": "Persist Group Chat Messages",
