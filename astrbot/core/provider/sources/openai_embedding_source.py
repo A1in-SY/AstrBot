@@ -5,6 +5,11 @@ import httpx
 from openai import AsyncOpenAI
 
 from astrbot import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_response_summary,
+)
 
 from ..entities import ProviderType
 from ..provider import EmbeddingProvider
@@ -24,6 +29,8 @@ def _normalize_api_base(api_base: str) -> str:
     provider_type=ProviderType.EMBEDDING,
 )
 class OpenAIEmbeddingProvider(EmbeddingProvider):
+    _astrbot_deep_outbound = True
+
     def __init__(self, provider_config: dict, provider_settings: dict) -> None:
         super().__init__(provider_config, provider_settings)
         self.provider_config = provider_config
@@ -49,21 +56,53 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
     async def get_embedding(self, text: str) -> list[float]:
         """获取文本的嵌入"""
         kwargs = self._embedding_kwargs()
-        embedding = await self.client.embeddings.create(
-            input=text,
-            model=self.model,
-            **kwargs,
+        parameters = {"input": text, "model": self.model, **kwargs}
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="openai.embeddings",
+                sdk_operation="client.embeddings.create",
+                base_url=str(self.client.base_url),
+                resource_path="/embeddings",
+                route_resolution="sdk_declared",
+                timeout_seconds=self.provider_config.get("timeout", 20),
+                proxy_configured=bool(self.provider_config.get("proxy")),
+                parameters=parameters,
+            )
         )
+        attempt_number = recorder.record_attempt()
+        try:
+            embedding = await self.client.embeddings.create(**parameters)
+        except BaseException as exc:
+            recorder.record_failed(exc, attempt_number=attempt_number)
+            raise
+        recorder.record_completed(embedding, attempt_number=attempt_number)
+        record_outbound_response_summary(usage=getattr(embedding, "usage", None))
         return embedding.data[0].embedding
 
     async def get_embeddings(self, text: list[str]) -> list[list[float]]:
         """批量获取文本的嵌入"""
         kwargs = self._embedding_kwargs()
-        embeddings = await self.client.embeddings.create(
-            input=text,
-            model=self.model,
-            **kwargs,
+        parameters = {"input": text, "model": self.model, **kwargs}
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="openai.embeddings",
+                sdk_operation="client.embeddings.create",
+                base_url=str(self.client.base_url),
+                resource_path="/embeddings",
+                route_resolution="sdk_declared",
+                timeout_seconds=self.provider_config.get("timeout", 20),
+                proxy_configured=bool(self.provider_config.get("proxy")),
+                parameters=parameters,
+            )
         )
+        attempt_number = recorder.record_attempt()
+        try:
+            embeddings = await self.client.embeddings.create(**parameters)
+        except BaseException as exc:
+            recorder.record_failed(exc, attempt_number=attempt_number)
+            raise
+        recorder.record_completed(embeddings, attempt_number=attempt_number)
+        record_outbound_response_summary(usage=getattr(embeddings, "usage", None))
         return [item.embedding for item in embeddings.data]
 
     def _embedding_kwargs(self) -> dict:

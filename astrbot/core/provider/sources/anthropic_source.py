@@ -20,6 +20,11 @@ from astrbot.core.provider.entities import (
     TokenUsage,
 )
 from astrbot.core.provider.func_tool_manager import ToolSet
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_response_summary,
+)
 from astrbot.core.utils.media_utils import (
     describe_media_ref,
     resolve_media_ref_to_base64_data,
@@ -525,6 +530,28 @@ class ProviderAnthropic(Provider):
         self._apply_thinking_config(payloads)
         self._sanitize_assistant_messages(payloads)
 
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="anthropic.messages",
+                sdk_operation="client.messages.create",
+                base_url=self.base_url,
+                resource_path="/v1/messages",
+                route_resolution="sdk_declared",
+                streaming=False,
+                timeout_seconds=self.timeout,
+                proxy_configured=bool(self.provider_config.get("proxy")),
+                parameters={**payloads, "extra_body": extra_body},
+                input_summary={
+                    "prompt_cache_enabled": bool(
+                        isinstance(payloads.get("system"), list)
+                        and payloads["system"]
+                        and isinstance(payloads["system"][-1], dict)
+                        and payloads["system"][-1].get("cache_control")
+                    ),
+                },
+            )
+        )
+
         try:
             completion = await retry_provider_request(
                 "Anthropic",
@@ -532,6 +559,7 @@ class ProviderAnthropic(Provider):
                     **payloads, stream=False, extra_body=extra_body
                 ),
                 max_attempts=request_max_retries,
+                recorder=recorder,
             )
         except httpx.RequestError as e:
             proxy = self.provider_config.get("proxy", "")
@@ -594,6 +622,11 @@ class ProviderAnthropic(Provider):
             completion_id=completion.id,
             stop_reason=completion.stop_reason,
         )
+        record_outbound_response_summary(
+            finish_reason=completion.stop_reason,
+            usage=llm_response.usage,
+            response_id=completion.id,
+        )
         return llm_response
 
     async def _query_stream(
@@ -620,6 +653,7 @@ class ProviderAnthropic(Provider):
         extra_body = self.provider_config.get("custom_extra_body", {})
         reasoning_content = ""
         reasoning_signature = ""
+        stop_reason = None
 
         if "max_tokens" not in payloads:
             payloads["max_tokens"] = 65536
@@ -627,10 +661,37 @@ class ProviderAnthropic(Provider):
         self._apply_thinking_config(payloads)
         self._sanitize_assistant_messages(payloads)
 
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="anthropic.messages",
+                sdk_operation="client.messages.stream",
+                base_url=self.base_url,
+                resource_path="/v1/messages",
+                route_resolution="sdk_declared",
+                streaming=True,
+                timeout_seconds=self.timeout,
+                proxy_configured=bool(self.provider_config.get("proxy")),
+                parameters={
+                    **payloads,
+                    "stream": True,
+                    "extra_body": extra_body,
+                },
+                input_summary={
+                    "prompt_cache_enabled": bool(
+                        isinstance(payloads.get("system"), list)
+                        and payloads["system"]
+                        and isinstance(payloads["system"][-1], dict)
+                        and payloads["system"][-1].get("cache_control")
+                    ),
+                },
+            )
+        )
+
         async with retry_provider_request_context(
             "Anthropic",
             lambda: self.client.messages.stream(**payloads, extra_body=extra_body),
             max_attempts=request_max_retries,
+            recorder=recorder,
         ) as stream:
             assert isinstance(stream, anthropic.AsyncMessageStream)
             async for event in stream:
@@ -728,6 +789,7 @@ class ProviderAnthropic(Provider):
                         del tool_use_buffer[event.index]
 
                 elif event.type == "message_delta":
+                    stop_reason = getattr(event.delta, "stop_reason", stop_reason)
                     if event.usage:
                         self._update_usage(usage, event.usage)
 
@@ -752,7 +814,12 @@ class ProviderAnthropic(Provider):
         self._ensure_usable_response(
             final_response,
             completion_id=id,
-            stop_reason=None,
+            stop_reason=stop_reason,
+        )
+        record_outbound_response_summary(
+            finish_reason=stop_reason,
+            usage=usage,
+            response_id=id,
         )
         yield final_response
 

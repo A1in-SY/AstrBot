@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -46,6 +47,32 @@ class _EmbeddingProvider(EmbeddingProvider):
         return (await self.get_embeddings([text]))[0]
 
     async def get_embeddings(self, text: list[str]) -> list[list[float]]:
+        return [[float(len(item))] for item in text]
+
+    def get_dim(self) -> int:
+        return 1
+
+
+class _RetryingBatchEmbeddingProvider(EmbeddingProvider):
+    def __init__(self) -> None:
+        super().__init__(
+            {
+                "id": "test-batch-embedding",
+                "type": "openai_embedding",
+                "embedding_api_base": "https://example.com/v1",
+            },
+            {},
+        )
+        self.calls: dict[tuple[str, ...], int] = {}
+
+    async def get_embedding(self, text: str) -> list[float]:
+        return (await self.get_embeddings([text]))[0]
+
+    async def get_embeddings(self, text: list[str]) -> list[list[float]]:
+        key = tuple(text)
+        self.calls[key] = self.calls.get(key, 0) + 1
+        if key == ("aa", "bb") and self.calls[key] == 1:
+            raise RuntimeError("temporary batch failure")
         return [[float(len(item))] for item in text]
 
     def get_dim(self) -> int:
@@ -112,6 +139,56 @@ async def test_embedding_internal_delegation_creates_one_logical_span(tmp_path):
         trace = (await service.store.list_traces())[0]
         detail = await service.store.get_trace(trace["trace_id"])
         assert [span["operation"] for span in detail["spans"]] == ["embedding.call"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_embedding_batch_records_real_dispatches_and_business_retry(
+    tmp_path,
+    monkeypatch,
+):
+    """The batch coordinator must not masquerade as one transport attempt."""
+
+    monkeypatch.setattr(
+        "astrbot.core.provider.provider.asyncio.sleep",
+        AsyncMock(),
+    )
+    service = TraceService(tmp_path / "trace")
+    await service.initialize()
+    try:
+        provider = _RetryingBatchEmbeddingProvider()
+        instrument_provider(provider, service)
+
+        result = await provider.get_embeddings_batch(
+            ["aa", "bb", "cc", "dd"],
+            batch_size=2,
+            tasks_limit=2,
+            max_retries=2,
+        )
+        assert result == [[2.0], [2.0], [2.0], [2.0]]
+        await service.flush()
+
+        trace = (await service.store.list_traces())[0]
+        detail = await service.store.get_trace(trace["trace_id"])
+        assert [span["operation"] for span in detail["spans"]] == ["embedding.call"]
+        span = detail["spans"][0]
+        assert span["attributes"]["attempt_count"] == 3
+        assert span["attributes"]["retry_count"] == 1
+        assert span["attributes"]["request_variant_count"] == 2
+        assert span["attributes"]["batch_count"] == 2
+        assert span["attributes"]["concurrency"] == 2
+        assert [
+            event["name"]
+            for event in detail["events"]
+            if event["name"] == "outbound.request.retry"
+        ] == ["outbound.request.retry"]
+        refs = [
+            ref
+            for ref in detail["artifact_refs"]
+            if ref["role"] == "outbound.effective_request"
+        ]
+        assert len(refs) == 2
     finally:
         await service.close()
 

@@ -1,6 +1,10 @@
 import aiohttp
 
 from astrbot import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+)
 
 from ..entities import ProviderType, RerankResult
 from ..provider import RerankProvider
@@ -14,6 +18,8 @@ from ..register import register_provider_adapter
 )
 class TEIRerankProvider(RerankProvider):
     """HuggingFace Text Embeddings Inference (TEI) Rerank 适配器。"""
+
+    _astrbot_deep_outbound = True
 
     def __init__(self, provider_config: dict, provider_settings: dict) -> None:
         super().__init__(provider_config, provider_settings)
@@ -69,6 +75,18 @@ class TEIRerankProvider(RerankProvider):
         if self.return_text:
             payload["return_text"] = True
 
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="tei.rerank",
+                sdk_operation="aiohttp.ClientSession.post",
+                base_url=self.base_url,
+                resource_path="/rerank",
+                route_resolution="constructed",
+                timeout_seconds=self.timeout,
+                parameters={**payload, "top_n": top_n},
+            )
+        )
+        attempt_number = recorder.record_attempt()
         try:
             rerank_url = f"{self.base_url}/rerank"
             logger.debug(
@@ -87,7 +105,13 @@ class TEIRerankProvider(RerankProvider):
                     logger.error(
                         f"[TEI Rerank] API returned HTTP {response.status}: {error_msg}"
                     )
-                    raise Exception(f"TEI Rerank HTTP {response.status}: {error_msg}")
+                    error = Exception(f"TEI Rerank HTTP {response.status}: {error_msg}")
+                    recorder.record_failed(
+                        error,
+                        attempt_number=attempt_number,
+                        status_code=response.status,
+                    )
+                    raise error
 
                 response_data = await response.json()
 
@@ -96,6 +120,7 @@ class TEIRerankProvider(RerankProvider):
                         f"[TEI Rerank] API returned empty results. "
                         f"Response: {response_data}"
                     )
+                    recorder.record_completed(response, attempt_number=attempt_number)
                     return []
 
                 results = []
@@ -113,12 +138,15 @@ class TEIRerankProvider(RerankProvider):
                 logger.debug(
                     f"[TEI Rerank] Successfully returned {len(results)} results"
                 )
+                recorder.record_completed(response, attempt_number=attempt_number)
                 return results
 
         except aiohttp.ClientError as e:
+            recorder.record_failed(e, attempt_number=attempt_number)
             logger.error(f"[TEI Rerank] Network error: {e}")
             raise Exception(f"TEI Rerank network error: {e}") from e
         except Exception as e:
+            recorder.record_failed(e, attempt_number=attempt_number)
             logger.error(f"[TEI Rerank] Error: {e}")
             raise
 

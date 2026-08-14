@@ -11,8 +11,7 @@ from typing import Any, Generic
 
 import httpx
 from tenacity import (
-    before_sleep_log,
-    retry,
+    AsyncRetrying,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
@@ -20,6 +19,13 @@ from tenacity import (
 
 from astrbot import logger
 from astrbot.core.agent.run_context import ContextWrapper
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_recovery,
+    record_outbound_result_attributes,
+    split_configured_endpoint,
+)
 from astrbot.core.utils.log_pipe import LogPipe
 
 from .run_context import TContext
@@ -745,33 +751,110 @@ class MCPClient:
             anyio.ClosedResourceError: raised after reconnection failure
         """
 
-        @retry(
+        config = _prepare_config((self._mcp_server_config or {}).copy())
+        remote_url = config.get("url")
+        remote_base_url, remote_resource_path = split_configured_endpoint(
+            remote_url,
+            dynamic_path_template="/{configured_mcp_path}",
+            static_paths=("/", "/mcp", "/sse"),
+        )
+        transport = (
+            config.get("transport") or config.get("type") or "stdio"
+            if remote_url
+            else "stdio"
+        )
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="mcp.tools.call",
+                sdk_operation="session.call_tool",
+                base_url=remote_base_url,
+                resource_path=(
+                    f"{remote_resource_path.rstrip('/')}/tools/call"
+                    if remote_resource_path
+                    else "tools/call"
+                ),
+                route_resolution=("sdk_declared" if remote_url else "unavailable"),
+                streaming=False,
+                timeout_seconds=read_timeout_seconds.total_seconds(),
+                parameters={
+                    "tool_name": tool_name,
+                    "arguments": arguments,
+                },
+                input_summary={
+                    "mcp_server_name": self._server_name,
+                    "mcp_transport": transport,
+                },
+            )
+        )
+        reconnect_count = 0
+
+        def _before_sleep(retry_state) -> None:
+            error = retry_state.outcome.exception() if retry_state.outcome else None
+            if error is None:
+                return
+            next_action = getattr(retry_state, "next_action", None)
+            recorder.record_retry(
+                error,
+                attempt_number=recorder.last_attempt_number,
+                next_attempt_number=retry_state.attempt_number + 1,
+                backoff_seconds=getattr(next_action, "sleep", None),
+            )
+
+        retrying = AsyncRetrying(
             retry=retry_if_exception_type(anyio.ClosedResourceError),
             stop=stop_after_attempt(2),
             wait=wait_exponential(multiplier=1, min=1, max=3),
-            before_sleep=before_sleep_log(logger, logging.WARNING),
+            before_sleep=_before_sleep,
             reraise=True,
         )
-        async def _call_with_retry():
-            if not self.session:
-                raise ValueError("MCP session is not available for MCP function tools.")
-
-            try:
-                return await self.session.call_tool(
-                    name=tool_name,
-                    arguments=arguments,
-                    read_timeout_seconds=read_timeout_seconds,
+        async for attempt in retrying:
+            attempt_number = recorder.record_attempt()
+            with attempt:
+                if not self.session:
+                    error = ValueError(
+                        "MCP session is not available for MCP function tools."
+                    )
+                    recorder.record_failed(error, attempt_number=attempt_number)
+                    raise error
+                try:
+                    result = await self.session.call_tool(
+                        name=tool_name,
+                        arguments=arguments,
+                        read_timeout_seconds=read_timeout_seconds,
+                    )
+                except anyio.ClosedResourceError as error:
+                    reconnect_count += 1
+                    logger.warning(
+                        "MCP tool %s call lost its connection; reconnecting.",
+                        tool_name,
+                    )
+                    record_outbound_recovery(
+                        "mcp_reconnect",
+                        span=recorder.span,
+                        attempt_number=attempt_number,
+                        close_attempt=False,
+                        reconnect_count=reconnect_count,
+                    )
+                    await self._reconnect()
+                    if attempt.retry_state.attempt_number >= 2:
+                        recorder.record_failed(
+                            error,
+                            attempt_number=attempt_number,
+                        )
+                    raise
+                except BaseException as error:
+                    recorder.record_failed(error, attempt_number=attempt_number)
+                    raise
+                recorder.record_completed(result, attempt_number=attempt_number)
+                record_outbound_result_attributes(
+                    span=recorder.span,
+                    reconnect_count=reconnect_count,
+                    mcp_is_error=bool(getattr(result, "isError", False)),
+                    mcp_error_code=getattr(result, "code", None),
                 )
-            except anyio.ClosedResourceError:
-                logger.warning(
-                    f"MCP tool {tool_name} call failed (ClosedResourceError), attempting to reconnect..."
-                )
-                # Attempt to reconnect
-                await self._reconnect()
-                # Reraise the exception to trigger tenacity retry
-                raise
+                return result
 
-        return await _call_with_retry()
+        raise RuntimeError("MCP tool retry loop exited unexpectedly.")
 
     async def cleanup(self) -> None:
         """Clean up resources by cancelling the connection owner task."""

@@ -56,6 +56,9 @@ class StarRequestSubStage(Stage):
                     materialize=False,
                     attributes={
                         "handler": handler.handler_name,
+                        "handler_full_name": handler.handler_full_name,
+                        "plugin_name": md.name,
+                        "plugin_version": md.version,
                         "event_type": handler.event_type.name,
                         "priority": handler.extras_configs.get("priority", 0),
                         "invocation_index": invocation_index,
@@ -131,11 +134,17 @@ class StarRequestSubStage(Stage):
                                 )
                                 trace_span.finish()
                             elif isinstance(terminal_error, asyncio.CancelledError):
+                                trace_span.set_attributes(
+                                    termination_category="cancelled",
+                                )
                                 trace_span.finish(
                                     status="cancelled",
                                     outcome="cancelled",
                                 )
                             elif isinstance(terminal_error, GeneratorExit):
+                                trace_span.set_attributes(
+                                    termination_category="generator_closed",
+                                )
                                 trace_span.finish(
                                     status="cancelled",
                                     outcome="generator_closed",
@@ -143,6 +152,7 @@ class StarRequestSubStage(Stage):
                             else:
                                 trace_span.set_attributes(
                                     exception_type=type(terminal_error).__name__,
+                                    termination_category="exception",
                                 )
                                 trace_span.finish(
                                     status="error",

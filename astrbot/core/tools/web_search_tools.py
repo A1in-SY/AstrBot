@@ -12,6 +12,12 @@ from astrbot.core import logger, sp
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 from astrbot.core.tools.registry import builtin_tool
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_recovery,
+    record_outbound_result_attributes,
+)
 
 WEB_SEARCH_TOOL_NAMES = [
     "web_search_baidu",
@@ -142,6 +148,95 @@ def _provider_endpoint(
     return f"{base_url}{path}"
 
 
+def _search_recorder(
+    provider_settings: dict,
+    *,
+    engine: str,
+    base_url_setting: str,
+    default_base_url: str,
+    path: str,
+    payload: dict,
+    http_method: str = "POST",
+) -> OutboundCallRecorder:
+    """Create fail-open diagnostics for one built-in search request variant."""
+
+    base_url = str(provider_settings.get(base_url_setting) or "").strip()
+    return OutboundCallRecorder(
+        OutboundRequestSnapshot(
+            api_family=f"search.{engine}",
+            sdk_operation=f"aiohttp.ClientSession.{http_method.lower()}",
+            http_method=http_method,
+            base_url=base_url or default_base_url,
+            resource_path=path,
+            route_resolution="constructed",
+            parameters=payload,
+            input_summary={"search_engine": engine, "request_batch_count": 1},
+        )
+    )
+
+
+def _record_search_success(
+    recorder: OutboundCallRecorder,
+    response: aiohttp.ClientResponse,
+    attempt_number: int,
+    *,
+    result_count: int,
+) -> None:
+    """Record a successful search response without copying its result bodies."""
+
+    recorder.record_completed(response, attempt_number=attempt_number)
+    record_outbound_result_attributes(
+        span=recorder.span,
+        search_result_count=result_count,
+        request_batch_count=1,
+    )
+
+
+def _record_search_status_failure(
+    recorder: OutboundCallRecorder,
+    attempt_number: int,
+    status_code: int,
+) -> None:
+    """Record an explicit terminal HTTP status without storing response text."""
+
+    recorder.record_failed(
+        RuntimeError(),
+        attempt_number=attempt_number,
+        status_code=status_code,
+    )
+
+
+def _record_credential_retry_or_failure(
+    recorder: OutboundCallRecorder,
+    *,
+    attempt_number: int,
+    status_code: int,
+    credential_index: int,
+    credential_count: int,
+) -> bool:
+    """Record credential failover only when another credential will be tried.
+
+    Returns:
+        ``True`` when the caller should continue to the next credential.
+    """
+
+    if credential_index + 1 >= credential_count:
+        _record_search_status_failure(recorder, attempt_number, status_code)
+        return False
+    recorder.record_retry_response(
+        attempt_number=attempt_number,
+        next_attempt_number=attempt_number + 1,
+        status_code=status_code,
+    )
+    record_outbound_recovery(
+        "rotate_credential",
+        span=recorder.span,
+        credential_rotated=True,
+        credential_rotation_count=credential_index + 1,
+    )
+    return True
+
+
 def normalize_legacy_web_search_config(cfg) -> None:
     provider_settings = cfg.get("provider_settings")
     if not provider_settings:
@@ -229,12 +324,21 @@ async def _tavily_search(
     # Retry key-specific failures with the next key, but fail fast for
     # non-retryable errors such as server-side 5xx responses.
     last_error = None
-    for _ in range(len(keys)):
+    recorder = _search_recorder(
+        provider_settings,
+        engine="tavily",
+        base_url_setting="websearch_tavily_base_url",
+        default_base_url=_TAVILY_BASE_URL,
+        path="/search",
+        payload=payload,
+    )
+    for credential_index in range(len(keys)):
         tavily_key = await _TAVILY_KEY_ROTATOR.get(provider_settings)
         header = {
             "Authorization": f"Bearer {tavily_key}",
             "Content-Type": "application/json",
         }
+        attempt_number = recorder.record_attempt()
         async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.post(
                 _provider_endpoint(
@@ -248,7 +352,7 @@ async def _tavily_search(
             ) as response:
                 if response.status == 200:
                     data = await response.json()
-                    return [
+                    results = [
                         SearchResult(
                             title=item.get("title"),
                             url=item.get("url"),
@@ -257,13 +361,29 @@ async def _tavily_search(
                         )
                         for item in data.get("results", [])
                     ]
+                    _record_search_success(
+                        recorder,
+                        response,
+                        attempt_number,
+                        result_count=len(results),
+                    )
+                    return results
                 reason = await response.text()
                 # Retryable errors are saved so the final failure is meaningful.
                 if response.status in _RETRYABLE_HTTP_STATUSES:
                     last_error = Exception(
                         f"Tavily web search failed: {reason}, status: {response.status}",
                     )
-                    continue
+                    if _record_credential_retry_or_failure(
+                        recorder,
+                        attempt_number=attempt_number,
+                        status_code=response.status,
+                        credential_index=credential_index,
+                        credential_count=len(keys),
+                    ):
+                        continue
+                    raise last_error
+                _record_search_status_failure(recorder, attempt_number, response.status)
                 raise Exception(
                     f"Tavily web search failed: {reason}, status: {response.status}",
                 )
@@ -294,12 +414,21 @@ async def _tavily_extract(provider_settings: dict, payload: dict) -> list[dict]:
         raise ValueError("Error: Tavily API key is not configured in AstrBot.")
 
     last_error = None
-    for _ in range(len(keys)):
+    recorder = _search_recorder(
+        provider_settings,
+        engine="tavily",
+        base_url_setting="websearch_tavily_base_url",
+        default_base_url=_TAVILY_BASE_URL,
+        path="/extract",
+        payload=payload,
+    )
+    for credential_index in range(len(keys)):
         tavily_key = await _TAVILY_KEY_ROTATOR.get(provider_settings)
         header = {
             "Authorization": f"Bearer {tavily_key}",
             "Content-Type": "application/json",
         }
+        attempt_number = recorder.record_attempt()
         async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.post(
                 _provider_endpoint(
@@ -318,13 +447,28 @@ async def _tavily_extract(provider_settings: dict, payload: dict) -> list[dict]:
                         raise ValueError(
                             "Error: Tavily web searcher does not return any results."
                         )
+                    _record_search_success(
+                        recorder,
+                        response,
+                        attempt_number,
+                        result_count=len(results),
+                    )
                     return results
                 reason = await response.text()
                 if response.status in _RETRYABLE_HTTP_STATUSES:
                     last_error = Exception(
                         f"Tavily web search failed: {reason}, status: {response.status}",
                     )
-                    continue
+                    if _record_credential_retry_or_failure(
+                        recorder,
+                        attempt_number=attempt_number,
+                        status_code=response.status,
+                        credential_index=credential_index,
+                        credential_count=len(keys),
+                    ):
+                        continue
+                    raise last_error
+                _record_search_status_failure(recorder, attempt_number, response.status)
                 raise Exception(
                     f"Tavily web search failed: {reason}, status: {response.status}",
                 )
@@ -357,7 +501,15 @@ async def _bocha_search(
         raise ValueError("Error: BoCha API key is not configured in AstrBot.")
 
     last_error = None
-    for _ in range(len(keys)):
+    recorder = _search_recorder(
+        provider_settings,
+        engine="bocha",
+        base_url_setting="websearch_bocha_base_url",
+        default_base_url=_BOCHA_BASE_URL,
+        path="/v1/web-search",
+        payload=payload,
+    )
+    for credential_index in range(len(keys)):
         bocha_key = await _BOCHA_KEY_ROTATOR.get(provider_settings)
         header = {
             "Authorization": f"Bearer {bocha_key}",
@@ -367,6 +519,7 @@ async def _bocha_search(
             # See: https://github.com/aio-libs/aiohttp/issues/11898
             "Accept-Encoding": "gzip, deflate",
         }
+        attempt_number = recorder.record_attempt()
         async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.post(
                 _provider_endpoint(
@@ -381,7 +534,7 @@ async def _bocha_search(
                 if response.status == 200:
                     data = await response.json()
                     rows = data["data"]["webPages"]["value"]
-                    return [
+                    results = [
                         SearchResult(
                             title=item.get("name"),
                             url=item.get("url"),
@@ -390,12 +543,28 @@ async def _bocha_search(
                         )
                         for item in rows
                     ]
+                    _record_search_success(
+                        recorder,
+                        response,
+                        attempt_number,
+                        result_count=len(results),
+                    )
+                    return results
                 reason = await response.text()
                 if response.status in _RETRYABLE_HTTP_STATUSES:
                     last_error = Exception(
                         f"BoCha web search failed: {reason}, status: {response.status}",
                     )
-                    continue
+                    if _record_credential_retry_or_failure(
+                        recorder,
+                        attempt_number=attempt_number,
+                        status_code=response.status,
+                        credential_index=credential_index,
+                        credential_count=len(keys),
+                    ):
+                        continue
+                    raise last_error
+                _record_search_status_failure(recorder, attempt_number, response.status)
                 raise Exception(
                     f"BoCha web search failed: {reason}, status: {response.status}",
                 )
@@ -428,12 +597,22 @@ async def _brave_search(
         raise ValueError("Error: Brave API key is not configured in AstrBot.")
 
     last_error = None
-    for _ in range(len(keys)):
+    recorder = _search_recorder(
+        provider_settings,
+        engine="brave",
+        base_url_setting="websearch_brave_base_url",
+        default_base_url=_BRAVE_BASE_URL,
+        path="/res/v1/web/search",
+        payload=payload,
+        http_method="GET",
+    )
+    for credential_index in range(len(keys)):
         brave_key = await _BRAVE_KEY_ROTATOR.get(provider_settings)
         header = {
             "Accept": "application/json",
             "X-Subscription-Token": brave_key,
         }
+        attempt_number = recorder.record_attempt()
         async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.get(
                 _provider_endpoint(
@@ -448,7 +627,7 @@ async def _brave_search(
                 if response.status == 200:
                     data = await response.json()
                     rows = data.get("web", {}).get("results", [])
-                    return [
+                    results = [
                         SearchResult(
                             title=item.get("title", ""),
                             url=item.get("url", ""),
@@ -456,12 +635,28 @@ async def _brave_search(
                         )
                         for item in rows
                     ]
+                    _record_search_success(
+                        recorder,
+                        response,
+                        attempt_number,
+                        result_count=len(results),
+                    )
+                    return results
                 reason = await response.text()
                 if response.status in _RETRYABLE_HTTP_STATUSES:
                     last_error = Exception(
                         f"Brave web search failed: {reason}, status: {response.status}",
                     )
-                    continue
+                    if _record_credential_retry_or_failure(
+                        recorder,
+                        attempt_number=attempt_number,
+                        status_code=response.status,
+                        credential_index=credential_index,
+                        credential_count=len(keys),
+                    ):
+                        continue
+                    raise last_error
+                _record_search_status_failure(recorder, attempt_number, response.status)
                 raise Exception(
                     f"Brave web search failed: {reason}, status: {response.status}",
                 )
@@ -494,12 +689,21 @@ async def _firecrawl_search(
         raise ValueError("Error: Firecrawl API key is not configured in AstrBot.")
 
     last_error = None
-    for _ in range(len(keys)):
+    recorder = _search_recorder(
+        provider_settings,
+        engine="firecrawl",
+        base_url_setting="websearch_firecrawl_base_url",
+        default_base_url=_FIRECRAWL_BASE_URL,
+        path="/v2/search",
+        payload=payload,
+    )
+    for credential_index in range(len(keys)):
         firecrawl_key = await _FIRECRAWL_KEY_ROTATOR.get(provider_settings)
         header = {
             "Authorization": f"Bearer {firecrawl_key}",
             "Content-Type": "application/json",
         }
+        attempt_number = recorder.record_attempt()
         async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.post(
                 _provider_endpoint(
@@ -516,7 +720,7 @@ async def _firecrawl_search(
                     rows = data.get("data", [])
                     if isinstance(rows, dict):
                         rows = rows.get("web", [])
-                    return [
+                    results = [
                         SearchResult(
                             title=item.get("title", ""),
                             url=item.get("url", ""),
@@ -530,12 +734,28 @@ async def _firecrawl_search(
                         for item in rows
                         if item.get("url")
                     ]
+                    _record_search_success(
+                        recorder,
+                        response,
+                        attempt_number,
+                        result_count=len(results),
+                    )
+                    return results
                 reason = await response.text()
                 if response.status in _RETRYABLE_HTTP_STATUSES:
                     last_error = Exception(
                         f"Firecrawl web search failed: {reason}, status: {response.status}",
                     )
-                    continue
+                    if _record_credential_retry_or_failure(
+                        recorder,
+                        attempt_number=attempt_number,
+                        status_code=response.status,
+                        credential_index=credential_index,
+                        credential_count=len(keys),
+                    ):
+                        continue
+                    raise last_error
+                _record_search_status_failure(recorder, attempt_number, response.status)
                 raise Exception(
                     f"Firecrawl web search failed: {reason}, status: {response.status}",
                 )
@@ -566,12 +786,21 @@ async def _firecrawl_scrape(provider_settings: dict, payload: dict) -> dict:
         raise ValueError("Error: Firecrawl API key is not configured in AstrBot.")
 
     last_error = None
-    for _ in range(len(keys)):
+    recorder = _search_recorder(
+        provider_settings,
+        engine="firecrawl",
+        base_url_setting="websearch_firecrawl_base_url",
+        default_base_url=_FIRECRAWL_BASE_URL,
+        path="/v2/scrape",
+        payload=payload,
+    )
+    for credential_index in range(len(keys)):
         firecrawl_key = await _FIRECRAWL_KEY_ROTATOR.get(provider_settings)
         header = {
             "Authorization": f"Bearer {firecrawl_key}",
             "Content-Type": "application/json",
         }
+        attempt_number = recorder.record_attempt()
         async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.post(
                 _provider_endpoint(
@@ -590,13 +819,28 @@ async def _firecrawl_scrape(provider_settings: dict, payload: dict) -> dict:
                         raise ValueError(
                             "Error: Firecrawl web scraper does not return any results."
                         )
+                    _record_search_success(
+                        recorder,
+                        response,
+                        attempt_number,
+                        result_count=1,
+                    )
                     return result
                 reason = await response.text()
                 if response.status in _RETRYABLE_HTTP_STATUSES:
                     last_error = Exception(
                         f"Firecrawl web scraper failed: {reason}, status: {response.status}",
                     )
-                    continue
+                    if _record_credential_retry_or_failure(
+                        recorder,
+                        attempt_number=attempt_number,
+                        status_code=response.status,
+                        credential_index=credential_index,
+                        credential_count=len(keys),
+                    ):
+                        continue
+                    raise last_error
+                _record_search_status_failure(recorder, attempt_number, response.status)
                 raise Exception(
                     f"Firecrawl web scraper failed: {reason}, status: {response.status}",
                 )
@@ -619,6 +863,15 @@ async def _baidu_search(
         "X-Appbuilder-Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    recorder = _search_recorder(
+        provider_settings,
+        engine="baidu_ai_search",
+        base_url_setting="websearch_baidu_base_url",
+        default_base_url=_BAIDU_BASE_URL,
+        path="/v2/ai_search/web_search",
+        payload=payload,
+    )
+    attempt_number = recorder.record_attempt()
     async with aiohttp.ClientSession(trust_env=True) as session:
         async with session.post(
             _provider_endpoint(
@@ -632,12 +885,13 @@ async def _baidu_search(
         ) as response:
             if response.status != 200:
                 reason = await response.text()
+                _record_search_status_failure(recorder, attempt_number, response.status)
                 raise Exception(
                     f"Baidu AI Search failed: {reason}, status: {response.status}",
                 )
             data = await response.json()
             references = data.get("references", [])
-            return [
+            results = [
                 SearchResult(
                     title=item.get("title", ""),
                     url=item.get("url", ""),
@@ -647,6 +901,13 @@ async def _baidu_search(
                 for item in references
                 if item.get("url")
             ]
+            _record_search_success(
+                recorder,
+                response,
+                attempt_number,
+                result_count=len(results),
+            )
+            return results
 
 
 @builtin_tool(config=_TAVILY_WEB_SEARCH_TOOL_CONFIG)
@@ -1096,6 +1357,15 @@ async def _exa_search(
         "x-api-key": exa_key,
         "Content-Type": "application/json",
     }
+    recorder = _search_recorder(
+        provider_settings,
+        engine="exa",
+        base_url_setting="websearch_exa_base_url",
+        default_base_url=_EXA_BASE_URL,
+        path="/search",
+        payload=payload,
+    )
+    attempt_number = recorder.record_attempt()
     async with aiohttp.ClientSession(trust_env=True) as session:
         async with session.post(
             _provider_endpoint(
@@ -1109,11 +1379,12 @@ async def _exa_search(
         ) as response:
             if response.status != 200:
                 reason = await response.text()
+                _record_search_status_failure(recorder, attempt_number, response.status)
                 raise Exception(
                     f"Exa web search failed: {reason}, status: {response.status}",
                 )
             data = await response.json()
-            return [
+            results = [
                 SearchResult(
                     title=item.get("title", ""),
                     url=item.get("url", ""),
@@ -1126,6 +1397,13 @@ async def _exa_search(
                 for item in data.get("results", [])
                 if item.get("url")
             ]
+            _record_search_success(
+                recorder,
+                response,
+                attempt_number,
+                result_count=len(results),
+            )
+            return results
 
 
 async def _exa_get_contents(
@@ -1138,6 +1416,15 @@ async def _exa_get_contents(
         "x-api-key": exa_key,
         "Content-Type": "application/json",
     }
+    recorder = _search_recorder(
+        provider_settings,
+        engine="exa",
+        base_url_setting="websearch_exa_base_url",
+        default_base_url=_EXA_BASE_URL,
+        path="/contents",
+        payload=payload,
+    )
+    attempt_number = recorder.record_attempt()
     async with aiohttp.ClientSession(trust_env=True) as session:
         async with session.post(
             _provider_endpoint(
@@ -1151,11 +1438,19 @@ async def _exa_get_contents(
         ) as response:
             if response.status != 200:
                 reason = await response.text()
+                _record_search_status_failure(recorder, attempt_number, response.status)
                 raise Exception(
                     f"Exa get contents failed: {reason}, status: {response.status}",
                 )
             data = await response.json()
-            return data.get("results", [])
+            results = data.get("results", [])
+            _record_search_success(
+                recorder,
+                response,
+                attempt_number,
+                result_count=len(results),
+            )
+            return results
 
 
 @builtin_tool(config=_EXA_WEB_SEARCH_TOOL_CONFIG)

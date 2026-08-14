@@ -1,3 +1,4 @@
+from collections import Counter
 from collections.abc import AsyncGenerator
 from contextlib import nullcontext
 
@@ -7,6 +8,7 @@ from astrbot.core.platform.sources.webchat.webchat_event import WebChatMessageEv
 from astrbot.core.platform.sources.wecom_ai_bot.wecomai_event import (
     WecomAIBotMessageEvent,
 )
+from astrbot.core.trace.outbound import stable_identifier_hash
 from astrbot.core.utils.active_event_registry import active_event_registry
 from astrbot.core.utils.async_generator import closing_async_generator
 
@@ -91,14 +93,32 @@ class PipelineScheduler:
         trace_service = self.ctx.trace_service
         if trace_service is not None:
             try:
+                components = event.get_messages()
+                component_counts = Counter(
+                    str(getattr(component, "type", type(component).__name__))
+                    for component in components
+                )
                 trace_scope = trace_service.start_lazy_trace(
                     "message.process",
                     attributes={
                         "umo": event.unified_msg_origin,
+                        "umo_hash": stable_identifier_hash(event.unified_msg_origin),
                         "platform_id": event.get_platform_id(),
                         "platform_name": event.get_platform_name(),
                         "sender_id": event.get_sender_id(),
                         "session_id": event.get_session_id(),
+                        "message_type": str(event.get_message_type().value),
+                        "component_count": len(components),
+                        "component_type_counts": dict(component_counts),
+                        "has_reply": any(
+                            getattr(component, "type", None) == "Reply"
+                            for component in components
+                        ),
+                        "has_media": any(
+                            getattr(component, "type", None)
+                            in {"Image", "Record", "Video", "File"}
+                            for component in components
+                        ),
                     },
                 )
             except Exception:
@@ -129,5 +149,25 @@ class PipelineScheduler:
 
                 logger.debug("pipeline execution completed.")
             finally:
+                if trace is not None:
+                    try:
+                        activated_handlers = event.get_extra("activated_handlers", [])
+                        result = event.get_result()
+                        trace.set_attributes(
+                            activated_handler_count=(
+                                len(activated_handlers)
+                                if isinstance(activated_handlers, list)
+                                else 0
+                            ),
+                            stopped=event.is_stopped(),
+                            result_type=(
+                                type(result).__name__ if result is not None else "none"
+                            ),
+                            has_send_operation=bool(
+                                getattr(event, "_has_send_oper", False)
+                            ),
+                        )
+                    except Exception:
+                        trace.mark_degraded("message_summary_failed")
                 event.cleanup_temporary_local_files()
                 active_event_registry.unregister(event)

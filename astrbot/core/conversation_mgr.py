@@ -13,15 +13,19 @@ from astrbot.core import sp
 from astrbot.core.agent.message import AssistantMessageSegment, UserMessageSegment
 from astrbot.core.db import BaseDatabase
 from astrbot.core.db.po import Conversation, ConversationV2
+from astrbot.core.trace.history_instrumentation import start_history_persist_span
+from astrbot.core.trace.outbound import stable_identifier_hash
+from astrbot.core.trace.service import NoopTraceSpan
 from astrbot.core.utils.datetime_utils import to_utc_timestamp
 
 
 class ConversationManager:
     """负责管理会话与 LLM 的对话，某个会话当前正在用哪个对话。"""
 
-    def __init__(self, db_helper: BaseDatabase) -> None:
+    def __init__(self, db_helper: BaseDatabase, trace_service=None) -> None:
         self.session_conversations: dict[str, str] = {}
         self.db = db_helper
+        self.trace_service = trace_service
         self.save_interval = 60  # 每 60 秒保存一次
 
         # 会话删除回调函数列表（用于级联清理，如知识库配置）
@@ -294,17 +298,38 @@ class ConversationManager:
             token_usage (int | None): token 使用量。None 表示不更新
 
         """
-        if not conversation_id:
-            # 如果没有提供 conversation_id，则获取当前的
-            conversation_id = await self.get_curr_conversation_id(unified_msg_origin)
-        if conversation_id:
-            await self.db.update_conversation(
-                cid=conversation_id,
-                title=title,
-                persona_id=persona_id,
-                content=history,
-                token_usage=token_usage,
-            )
+        span = start_history_persist_span(
+            self.trace_service,
+            unified_msg_origin=unified_msg_origin,
+            conversation_id=conversation_id,
+            history=history,
+            token_usage=token_usage,
+        )
+        with span:
+            if not conversation_id:
+                # 如果没有提供 conversation_id，则获取当前的
+                conversation_id = await self.get_curr_conversation_id(
+                    unified_msg_origin
+                )
+            if conversation_id:
+                await self.db.update_conversation(
+                    cid=conversation_id,
+                    title=title,
+                    persona_id=persona_id,
+                    content=history,
+                    token_usage=token_usage,
+                )
+                if not isinstance(span, NoopTraceSpan):
+                    span.set_attributes(
+                        conversation_id_hash=stable_identifier_hash(conversation_id),
+                        write_performed=True,
+                        write_result="updated",
+                    )
+            elif not isinstance(span, NoopTraceSpan):
+                span.set_attributes(
+                    write_performed=False,
+                    skip_reason="conversation_not_resolved",
+                ).set_outcome("skipped")
 
     @deprecated(reason="Use update_conversation() with the title parameter instead.")
     async def update_conversation_title(

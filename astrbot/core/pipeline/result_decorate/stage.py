@@ -1,3 +1,4 @@
+import asyncio
 import random
 import re
 import time
@@ -13,7 +14,7 @@ from astrbot.core.platform.message_type import MessageType
 from astrbot.core.star.session_llm_manager import SessionServiceManager
 from astrbot.core.star.star import star_map
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
-from astrbot.core.trace.service import NoopTraceSpan
+from astrbot.core.trace.service import NoopTraceSpan, TraceSpan
 
 from ..context import PipelineContext
 from ..stage import Stage, register_stage, registered_stages
@@ -173,6 +174,11 @@ class ResultDecorateStage(Stage):
                     materialize=False,
                     attributes={
                         "handler": handler.handler_name,
+                        "handler_full_name": handler.handler_full_name,
+                        "plugin_name": (plugin.name if plugin is not None else None),
+                        "plugin_version": (
+                            plugin.version if plugin is not None else None
+                        ),
                         "event_type": handler.event_type.name,
                         "priority": handler.extras_configs.get("priority", 0),
                         "invocation_index": invocation_index,
@@ -223,7 +229,16 @@ class ResultDecorateStage(Stage):
                         f"{star_map[handler.handler_module_path].name} - "
                         f"{handler.handler_name} cleared the message result.",
                     )
-            except BaseException:
+            except BaseException as exc:
+                if isinstance(trace_span, TraceSpan):
+                    trace_span.set_attributes(
+                        termination_category=(
+                            "cancelled"
+                            if isinstance(exc, asyncio.CancelledError)
+                            else "exception"
+                        ),
+                        exception_type=type(exc).__name__,
+                    )
                 if trace_service is not None:
                     trace_service.materialize()
                 logger.error(traceback.format_exc())
@@ -367,6 +382,7 @@ class ResultDecorateStage(Stage):
                         attributes={
                             "mode": "normal",
                             "plain_component_count": candidate_count,
+                            "input_candidate_count": candidate_count,
                         },
                     )
                     if trace_service is not None and candidate_count
@@ -435,6 +451,8 @@ class ResultDecorateStage(Stage):
                     trace_span.set_attributes(
                         converted_count=converted_count,
                         fallback_to_text_count=fallback_to_text_count,
+                        provider_call_count=(converted_count + fallback_to_text_count),
+                        pipeline_retry_count=0,
                     ).set_outcome("converted" if converted_count else "fallback_text")
                     if fallback_to_text_count:
                         trace_span.mark_degraded("tts_failed")

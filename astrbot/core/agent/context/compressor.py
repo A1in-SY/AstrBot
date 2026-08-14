@@ -75,6 +75,9 @@ class TruncateByTurnsCompressor:
         """
         self.truncate_turns = truncate_turns
         self.compression_threshold = compression_threshold
+        self._last_trace_summarized_message_ids: set[int] = set()
+        self._last_trace_summary_message_id: int | None = None
+        self._last_trace_model_call_attempted = False
 
     def should_compress(
         self, messages: list[Message], current_tokens: int, max_tokens: int
@@ -95,6 +98,9 @@ class TruncateByTurnsCompressor:
         return usage_rate > self.compression_threshold
 
     async def __call__(self, messages: list[Message]) -> list[Message]:
+        self._last_trace_summarized_message_ids = set()
+        self._last_trace_summary_message_id = None
+        self._last_trace_model_call_attempted = False
         truncator = ContextTruncator()
         truncated_messages = truncator.truncate_by_dropping_oldest_turns(
             messages,
@@ -155,6 +161,9 @@ class LLMSummaryCompressor:
         self.compression_threshold = compression_threshold
         self.token_counter = token_counter or EstimateTokenCounter()
         self.llm_request_executor = llm_request_executor
+        self._last_trace_summarized_message_ids: set[int] = set()
+        self._last_trace_summary_message_id: int | None = None
+        self._last_trace_model_call_attempted = False
 
         self.instruction_text = instruction_text or (
             "Based on our full conversation history, produce a concise summary of key takeaways and/or project progress.\n"
@@ -223,6 +232,10 @@ class LLMSummaryCompressor:
         """
         from .round_utils import split_into_rounds
 
+        self._last_trace_summarized_message_ids = set()
+        self._last_trace_summary_message_id = None
+        self._last_trace_model_call_attempted = False
+
         rounds = split_into_rounds(messages)
         message_rounds = [
             [seg for seg in rnd if isinstance(seg, Message)] for rnd in rounds
@@ -284,6 +297,7 @@ class LLMSummaryCompressor:
 
         # Generate summary
         try:
+            self._last_trace_model_call_attempted = True
 
             async def request() -> "LLMResponse":
                 return await self.provider.text_chat(
@@ -308,12 +322,11 @@ class LLMSummaryCompressor:
         # Build result: system messages + summary pair + recent rounds
         result = _extract_system_messages(messages)
 
-        result.append(
-            Message(
-                role="user",
-                content=f"Our previous history conversation summary: {summary_content}",
-            )
+        summary_message = Message(
+            role="user",
+            content=f"Our previous history conversation summary: {summary_content}",
         )
+        result.append(summary_message)
         result.append(
             Message(
                 role="assistant",
@@ -326,5 +339,14 @@ class LLMSummaryCompressor:
             for seg in rnd:
                 if isinstance(seg, Message):
                     result.append(seg)
+
+        original_message_ids = {id(message) for message in messages}
+        preserved_ids = {
+            id(message) for message in result if id(message) in original_message_ids
+        }
+        self._last_trace_summarized_message_ids = {
+            id(message) for message in messages if id(message) not in preserved_ids
+        }
+        self._last_trace_summary_message_id = id(summary_message)
 
         return result

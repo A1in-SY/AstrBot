@@ -57,6 +57,7 @@ _RESERVED_PLUGIN_OPERATIONS = frozenset(
         "message.send",
         "agent.run",
         "agent.step",
+        "agent.context.compress",
         "model.call",
         "tool.call",
         "mcp.tool.call",
@@ -71,6 +72,7 @@ _RESERVED_PLUGIN_OPERATIONS = frozenset(
         "plugin.hook",
         "response.deliver",
         "conversation.history.persist",
+        "tool.background.run",
     }
 )
 

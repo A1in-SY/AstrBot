@@ -1,6 +1,11 @@
 import aiohttp
 
 from astrbot import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_response_summary,
+)
 
 from ..entities import ProviderType
 from ..provider import EmbeddingProvider
@@ -13,6 +18,8 @@ from ..register import register_provider_adapter
     provider_type=ProviderType.EMBEDDING,
 )
 class OllamaEmbeddingProvider(EmbeddingProvider):
+    _astrbot_deep_outbound = True
+
     def __init__(self, provider_config: dict, provider_settings: dict) -> None:
         super().__init__(provider_config, provider_settings)
         self.provider_config = provider_config
@@ -72,6 +79,19 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
 
         payload = self._build_payload(text)
         request_url = f"{self.base_url}/api/embed"
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="ollama.embed",
+                sdk_operation="aiohttp.ClientSession.post",
+                base_url=self.base_url,
+                resource_path="/api/embed",
+                route_resolution="constructed",
+                timeout_seconds=self.timeout,
+                proxy_configured=bool(self.proxy),
+                parameters=payload,
+            )
+        )
+        attempt_number = recorder.record_attempt()
 
         try:
             async with client.post(
@@ -82,9 +102,15 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
                     logger.error(
                         f"[Ollama Embedding] API Error: {response.status} - {error_text}"
                     )
-                    raise Exception(
+                    error = Exception(
                         f"Ollama Embedding API request failed: HTTP {response.status} - {error_text}"
                     )
+                    recorder.record_failed(
+                        error,
+                        attempt_number=attempt_number,
+                        status_code=response.status,
+                    )
+                    raise error
 
                 response_data = await response.json()
                 embeddings = response_data.get("embeddings", [])
@@ -94,12 +120,16 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
                         f"[Ollama Embedding] No embeddings returned: {response_data}"
                     )
 
+                recorder.record_completed(response, attempt_number=attempt_number)
+                record_outbound_response_summary(usage=response_data)
                 return embeddings
 
         except aiohttp.ClientError as e:
+            recorder.record_failed(e, attempt_number=attempt_number)
             logger.error(f"[Ollama Embedding] Network error: {e}")
             raise
         except Exception as e:
+            recorder.record_failed(e, attempt_number=attempt_number)
             logger.error(f"[Ollama Embedding] Error: {e}", exc_info=True)
             raise
 

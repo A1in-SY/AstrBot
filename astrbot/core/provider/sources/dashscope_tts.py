@@ -14,6 +14,12 @@ except (
 ):  # pragma: no cover - older dashscope versions without Qwen TTS support
     MultiModalConversation = None
 
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_result_attributes,
+    split_configured_endpoint,
+)
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.datetime_utils import generate_timestamp_id
 
@@ -28,6 +34,8 @@ from ..register import register_provider_adapter
     provider_type=ProviderType.TEXT_TO_SPEECH,
 )
 class ProviderDashscopeTTSAPI(TTSProvider):
+    _astrbot_deep_outbound = True
+
     def __init__(
         self,
         provider_config: dict,
@@ -49,9 +57,59 @@ class ProviderDashscopeTTSAPI(TTSProvider):
         os.makedirs(temp_dir, exist_ok=True)
 
         if self._is_qwen_tts_model(model):
-            audio_bytes, ext = await self._synthesize_with_qwen_tts(model, text)
+            recorder = OutboundCallRecorder(
+                OutboundRequestSnapshot(
+                    api_family="dashscope.multimodal_generation",
+                    sdk_operation="MultiModalConversation.call",
+                    base_url="https://dashscope.aliyuncs.com/api/v1",
+                    resource_path="/services/aigc/multimodal-generation/generation",
+                    route_resolution="sdk_declared",
+                    timeout_seconds=self.timeout_ms / 1000,
+                    parameters={
+                        "model": model,
+                        "text": text,
+                        "voice": self.voice or "Cherry",
+                    },
+                )
+            )
+            attempt_number = recorder.record_attempt()
+            try:
+                audio_bytes, ext, response = await self._synthesize_with_qwen_tts(
+                    model,
+                    text,
+                    recorder,
+                    attempt_number,
+                )
+            except BaseException as exc:
+                recorder.record_failed(exc, attempt_number=attempt_number)
+                raise
         else:
-            audio_bytes, ext = await self._synthesize_with_cosyvoice(model, text)
+            recorder = OutboundCallRecorder(
+                OutboundRequestSnapshot(
+                    api_family="dashscope.speech_synthesis",
+                    sdk_operation="SpeechSynthesizer.call",
+                    base_url="https://dashscope.aliyuncs.com",
+                    resource_path="/{sdk_speech_synthesis_path}",
+                    route_resolution="sdk_declared",
+                    timeout_seconds=self.timeout_ms / 1000,
+                    parameters={
+                        "model": model,
+                        "text": text,
+                        "voice": self.voice,
+                        "response_format": "wav",
+                        "sample_rate": 24000,
+                    },
+                )
+            )
+            attempt_number = recorder.record_attempt()
+            try:
+                audio_bytes, ext, response = await self._synthesize_with_cosyvoice(
+                    model, text
+                )
+            except BaseException as exc:
+                recorder.record_failed(exc, attempt_number=attempt_number)
+                raise
+            recorder.record_completed(response, attempt_number=attempt_number)
 
         if not audio_bytes:
             raise RuntimeError(
@@ -61,6 +119,7 @@ class ProviderDashscopeTTSAPI(TTSProvider):
         path = os.path.join(temp_dir, f"dashscope_tts_{generate_timestamp_id()}{ext}")
         with open(path, "wb") as f:
             f.write(audio_bytes)
+        record_outbound_result_attributes(audio_bytes=len(audio_bytes))
         return path
 
     def _call_qwen_tts(self, model: str, text: str):
@@ -86,16 +145,19 @@ class ProviderDashscopeTTSAPI(TTSProvider):
         self,
         model: str,
         text: str,
-    ) -> tuple[bytes | None, str]:
+        recorder: OutboundCallRecorder,
+        attempt_number: int,
+    ) -> tuple[bytes | None, str, object]:
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, self._call_qwen_tts, model, text)
+        recorder.record_completed(response, attempt_number=attempt_number)
         audio_bytes = await self._extract_audio_from_response(response)
         if not audio_bytes:
             raise RuntimeError(
                 f"Audio synthesis failed for model '{model}'. {response}",
             )
         ext = ".wav"
-        return audio_bytes, ext
+        return audio_bytes, ext, response
 
     async def _extract_audio_from_response(self, response) -> bytes | None:
         output = getattr(response, "output", None)
@@ -120,6 +182,22 @@ class ProviderDashscopeTTSAPI(TTSProvider):
         if not url:
             return None
         timeout = max(self.timeout_ms / 1000, 1) if self.timeout_ms else 20
+        route_base, route_path = split_configured_endpoint(
+            url,
+            dynamic_path_template="/{generated_audio_path}",
+        )
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="dashscope.audio.download",
+                sdk_operation="aiohttp.ClientSession.get",
+                http_method="GET",
+                base_url=route_base,
+                resource_path=route_path,
+                route_resolution="constructed",
+                timeout_seconds=timeout,
+            )
+        )
+        attempt_number = recorder.record_attempt()
         try:
             async with (
                 aiohttp.ClientSession() as session,
@@ -128,8 +206,11 @@ class ProviderDashscopeTTSAPI(TTSProvider):
                     timeout=aiohttp.ClientTimeout(total=timeout),
                 ) as response,
             ):
-                return await response.read()
+                audio_bytes = await response.read()
+                recorder.record_completed(response, attempt_number=attempt_number)
+                return audio_bytes
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+            recorder.record_failed(e, attempt_number=attempt_number)
             logging.exception(f"Failed to download audio from URL {url}: {e}")
             return None
 
@@ -137,7 +218,7 @@ class ProviderDashscopeTTSAPI(TTSProvider):
         self,
         model: str,
         text: str,
-    ) -> tuple[bytes | None, str]:
+    ) -> tuple[bytes | None, str, object]:
         synthesizer = SpeechSynthesizer(
             model=model,
             voice=self.voice,
@@ -156,7 +237,7 @@ class ProviderDashscopeTTSAPI(TTSProvider):
                 raise RuntimeError(
                     f"Audio synthesis failed for model '{model}'. {resp}".strip(),
                 )
-        return audio_bytes, ".wav"
+        return audio_bytes, ".wav", synthesizer.get_response()
 
     def _is_qwen_tts_model(self, model: str) -> bool:
         model_lower = model.lower()

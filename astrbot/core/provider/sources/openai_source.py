@@ -34,6 +34,13 @@ from astrbot.core.provider.entities import (
     TokenUsage,
     ToolCallsResult,
 )
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_active_outbound_failure,
+    record_outbound_recovery,
+    record_outbound_response_summary,
+)
 from astrbot.core.utils.media_utils import (
     describe_media_ref,
     resolve_media_ref_to_base64_data,
@@ -336,6 +343,10 @@ class ProviderOpenAIOfficial(Provider):
         )
         new_contexts = await self._remove_image_from_context(context_query)
         payloads["messages"] = new_contexts
+        record_outbound_recovery(
+            "remove_images",
+            recovery_reason=reason,
+        )
         return (
             False,
             chosen_key,
@@ -578,6 +589,20 @@ class ProviderOpenAIOfficial(Provider):
 
         self._sanitize_assistant_messages(payloads)
 
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="openai.chat.completions",
+                sdk_operation="client.chat.completions.create",
+                base_url=str(self.client.base_url),
+                resource_path="/chat/completions",
+                route_resolution="sdk_declared",
+                streaming=False,
+                timeout_seconds=self.timeout,
+                proxy_configured=bool(self.provider_config.get("proxy")),
+                parameters={**payloads, "extra_body": extra_body},
+            )
+        )
+
         completion = await retry_provider_request(
             "OpenAI",
             lambda: self.client.chat.completions.create(
@@ -586,6 +611,8 @@ class ProviderOpenAIOfficial(Provider):
                 extra_body=extra_body,
             ),
             max_attempts=request_max_retries,
+            recorder=recorder,
+            _record_terminal_failure=False,
         )
 
         if not isinstance(completion, ChatCompletion):
@@ -596,6 +623,13 @@ class ProviderOpenAIOfficial(Provider):
         logger.debug(f"completion: {completion}")
 
         llm_response = await self._parse_openai_completion(completion, tools)
+        record_outbound_response_summary(
+            finish_reason=(
+                completion.choices[0].finish_reason if completion.choices else None
+            ),
+            usage=completion.usage,
+            response_id=completion.id,
+        )
 
         return llm_response
 
@@ -636,6 +670,24 @@ class ProviderOpenAIOfficial(Provider):
 
         self._sanitize_assistant_messages(payloads)
 
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="openai.chat.completions",
+                sdk_operation="client.chat.completions.create",
+                base_url=str(self.client.base_url),
+                resource_path="/chat/completions",
+                route_resolution="sdk_declared",
+                streaming=True,
+                timeout_seconds=self.timeout,
+                proxy_configured=bool(self.provider_config.get("proxy")),
+                parameters={
+                    **payloads,
+                    "stream": True,
+                    "extra_body": extra_body,
+                },
+            )
+        )
+
         stream = await retry_provider_request(
             "OpenAI",
             lambda: self.client.chat.completions.create(
@@ -645,65 +697,90 @@ class ProviderOpenAIOfficial(Provider):
                 stream_options={"include_usage": True},
             ),
             max_attempts=request_max_retries,
+            recorder=recorder,
+            _defer_completion=True,
+            _record_terminal_failure=False,
         )
 
         llm_response = LLMResponse("assistant", is_chunk=True)
 
         state = ChatCompletionStreamState()
 
-        async for chunk in stream:
-            choice = chunk.choices[0] if chunk.choices else None
-            delta = choice.delta if choice else None
+        try:
+            async for chunk in stream:
+                choice = chunk.choices[0] if chunk.choices else None
+                delta = choice.delta if choice else None
 
-            if delta and (dtcs := delta.tool_calls):
-                for idx, tc in enumerate(dtcs):
-                    # siliconflow workaround
-                    if tc.function and tc.function.arguments:
-                        tc.type = "function"
-                    # Fix for #6661: Add missing 'index' field to tool_call deltas
-                    # Gemini and some OpenAI-compatible proxies omit this field
-                    if not hasattr(tc, "index") or tc.index is None:
-                        tc.index = idx
-            # 跳过 delta=None 的 chunk，避免 SDK 内部 _convert_initial_chunk_into_snapshot
-            # 第 747 行 choice.delta.to_dict() 抛出 NoneType 错误。
-            # refs: AstrBot#6689 / openai-python#5069 / #5047
-            # 例外：流末尾的 usage chunk（choices=[]，delta=None 但有 usage 数据）
-            # 需要传给 state，否则最终 completion 会丢失 usage 信息
-            if delta is not None or chunk.usage:
-                try:
-                    state.handle_chunk(chunk)
-                except Exception as e:
-                    logger.error("Saving chunk state error: " + str(e))
-            # logger.debug(f"chunk delta: {delta}")
-            # handle the content delta
-            reasoning = self._extract_reasoning_content(chunk)
-            _y = False
-            llm_response.id = chunk.id
-            llm_response.reasoning_content = None
-            llm_response.completion_text = ""
-            if reasoning is not None:
-                llm_response.reasoning_content = reasoning
-                _y = True
-            if delta and delta.content:
-                # Don't strip streaming chunks to preserve spaces between words
-                completion_text = self._normalize_content(delta.content, strip=False)
-                llm_response.result_chain = MessageChain(
-                    chain=[Comp.Plain(completion_text)],
-                )
-                _y = True
-            if chunk.usage:
-                llm_response.usage = self._extract_usage(chunk.usage)
-            elif choice and (choice_usage := getattr(choice, "usage", None)):
-                # Workaround for some providers that only return usage in choices[].usage, e.g. MoonshotAI
-                # See https://github.com/AstrBotDevs/AstrBot/issues/6614
-                llm_response.usage = self._extract_usage(choice_usage)
-                state.current_completion_snapshot.usage = choice_usage
-            if _y:
-                yield llm_response
+                if delta and (dtcs := delta.tool_calls):
+                    for idx, tc in enumerate(dtcs):
+                        # siliconflow workaround
+                        if tc.function and tc.function.arguments:
+                            tc.type = "function"
+                        # Fix for #6661: Add missing 'index' field to tool_call deltas
+                        # Gemini and some OpenAI-compatible proxies omit this field
+                        if not hasattr(tc, "index") or tc.index is None:
+                            tc.index = idx
+                # 跳过 delta=None 的 chunk，避免 SDK 内部 _convert_initial_chunk_into_snapshot
+                # 第 747 行 choice.delta.to_dict() 抛出 NoneType 错误。
+                # refs: AstrBot#6689 / openai-python#5069 / #5047
+                # 例外：流末尾的 usage chunk（choices=[]，delta=None 但有 usage 数据）
+                # 需要传给 state，否则最终 completion 会丢失 usage 信息
+                if delta is not None or chunk.usage:
+                    try:
+                        state.handle_chunk(chunk)
+                    except Exception as e:
+                        logger.error("Saving chunk state error: " + str(e))
+                # logger.debug(f"chunk delta: {delta}")
+                # handle the content delta
+                reasoning = self._extract_reasoning_content(chunk)
+                _y = False
+                llm_response.id = chunk.id
+                llm_response.reasoning_content = None
+                llm_response.completion_text = ""
+                if reasoning is not None:
+                    llm_response.reasoning_content = reasoning
+                    _y = True
+                if delta and delta.content:
+                    # Don't strip streaming chunks to preserve spaces between words
+                    completion_text = self._normalize_content(
+                        delta.content, strip=False
+                    )
+                    llm_response.result_chain = MessageChain(
+                        chain=[Comp.Plain(completion_text)],
+                    )
+                    _y = True
+                if chunk.usage:
+                    llm_response.usage = self._extract_usage(chunk.usage)
+                elif choice and (choice_usage := getattr(choice, "usage", None)):
+                    # Workaround for some providers that only return usage in choices[].usage, e.g. MoonshotAI
+                    # See https://github.com/AstrBotDevs/AstrBot/issues/6614
+                    llm_response.usage = self._extract_usage(choice_usage)
+                    state.current_completion_snapshot.usage = choice_usage
+                if _y:
+                    yield llm_response
+
+            recorder.record_completed(
+                stream, attempt_number=recorder.last_attempt_number
+            )
+        except BaseException as error:
+            recorder.record_failed(
+                error,
+                attempt_number=recorder.last_attempt_number,
+            )
+            raise
 
         try:
             final_completion = state.get_final_completion()
             llm_response = await self._parse_openai_completion(final_completion, tools)
+            record_outbound_response_summary(
+                finish_reason=(
+                    final_completion.choices[0].finish_reason
+                    if final_completion.choices
+                    else None
+                ),
+                usage=final_completion.usage,
+                response_id=final_completion.id,
+            )
             yield llm_response
         except Exception as e:
             logger.error("get_final_completion error: " + str(e))
@@ -1117,6 +1194,11 @@ class ProviderOpenAIOfficial(Provider):
                 available_api_keys.remove(chosen_key)
             if len(available_api_keys) > 0:
                 chosen_key = random.choice(available_api_keys)
+                record_outbound_recovery(
+                    "rotate_credential",
+                    credential_rotated=True,
+                    credential_rotation_count=retry_cnt + 1,
+                )
                 return (
                     False,
                     chosen_key,
@@ -1126,6 +1208,7 @@ class ProviderOpenAIOfficial(Provider):
                     func_tool,
                     image_fallback_used,
                 )
+            record_active_outbound_failure(e)
             raise e
         if "maximum context length" in str(e) or "context length" in str(e).lower():
             logger.warning(
@@ -1133,6 +1216,7 @@ class ProviderOpenAIOfficial(Provider):
             )
             await self.pop_record(context_query)
             payloads["messages"] = context_query
+            record_outbound_recovery("shrink_context")
             return (
                 False,
                 chosen_key,
@@ -1202,6 +1286,7 @@ class ProviderOpenAIOfficial(Provider):
                 f"{self.get_model()} 不支持函数工具调用，已自动去除，不影响使用。如需永久关闭，可前往 WebUI 中关闭工具调用。",
             )
             payloads.pop("tools", None)
+            record_outbound_recovery("disable_tools")
             return (
                 False,
                 chosen_key,
@@ -1217,6 +1302,7 @@ class ProviderOpenAIOfficial(Provider):
             proxy = self.provider_config.get("proxy", "")
             log_connection_failure("OpenAI", e, proxy)
 
+        record_active_outbound_failure(e)
         raise e
 
     async def text_chat(

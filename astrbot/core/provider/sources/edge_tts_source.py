@@ -5,6 +5,11 @@ import subprocess
 import edge_tts
 
 from astrbot.core import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_result_attributes,
+)
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.datetime_utils import generate_timestamp_id
 
@@ -27,6 +32,8 @@ Windows 如果提示找不到指定文件，以管理员身份运行命令行窗
     provider_type=ProviderType.TEXT_TO_SPEECH,
 )
 class ProviderEdgeTTS(TTSProvider):
+    _astrbot_deep_outbound = True
+
     def __init__(
         self,
         provider_config: dict,
@@ -63,7 +70,29 @@ class ProviderEdgeTTS(TTSProvider):
 
         try:
             communicate = edge_tts.Communicate(proxy=self.proxy, **kwargs)
-            await communicate.save(mp3_path)
+            recorder = OutboundCallRecorder(
+                OutboundRequestSnapshot(
+                    api_family="edge.tts",
+                    sdk_operation="edge_tts.Communicate.save",
+                    base_url="https://speech.platform.bing.com",
+                    resource_path=("/consumer/speech/synthesize/readaloud/edge/v1"),
+                    route_resolution="sdk_declared",
+                    streaming=True,
+                    proxy_configured=bool(self.proxy),
+                    parameters={
+                        **kwargs,
+                        "model": "edge_tts",
+                    },
+                    ignored_fields=("timeout",),
+                )
+            )
+            attempt_number = recorder.record_attempt()
+            try:
+                await communicate.save(mp3_path)
+            except BaseException as exc:
+                recorder.record_failed(exc, attempt_number=attempt_number)
+                raise
+            recorder.record_completed(communicate, attempt_number=attempt_number)
 
             try:
                 from pyffmpeg import FFmpeg
@@ -103,6 +132,7 @@ class ProviderEdgeTTS(TTSProvider):
 
             os.remove(mp3_path)
             if os.path.exists(wav_path) and os.path.getsize(wav_path) > 0:
+                record_outbound_result_attributes(audio_bytes=os.path.getsize(wav_path))
                 return wav_path
             logger.error("生成的WAV文件不存在或为空")
             raise RuntimeError("生成的WAV文件不存在或为空")

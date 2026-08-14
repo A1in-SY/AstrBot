@@ -5,6 +5,11 @@ from http import HTTPStatus
 from dashscope import MultiModalEmbedding, TextEmbedding
 
 from astrbot import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_response_summary,
+)
 
 from ..entities import ProviderType
 from ..provider import EmbeddingProvider
@@ -27,6 +32,8 @@ class DashScopeEmbeddingProvider(EmbeddingProvider):
     tongyi-embedding-vision-*) through MultiModalEmbedding, so that models
     unavailable in the OpenAI-compatible mode can be used.
     """
+
+    _astrbot_deep_outbound = True
 
     def __init__(self, provider_config: dict, provider_settings: dict) -> None:
         super().__init__(provider_config, provider_settings)
@@ -99,20 +106,55 @@ class DashScopeEmbeddingProvider(EmbeddingProvider):
                 **kwargs,
             )
 
-        resp = await asyncio.to_thread(_call)
+        task = "multimodal-embedding" if is_multimodal else "text-embedding"
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="dashscope.embedding",
+                sdk_operation=(
+                    "MultiModalEmbedding.call"
+                    if is_multimodal
+                    else "TextEmbedding.call"
+                ),
+                base_url=self.base_url,
+                resource_path=f"/services/embeddings/{task}/{task}",
+                route_resolution="sdk_declared",
+                parameters={
+                    "model": self.model,
+                    "input": text,
+                    "dimension": kwargs.get("dimension"),
+                },
+                transformations=(
+                    ("wrap_multimodal_text_inputs",) if is_multimodal else ()
+                ),
+            )
+        )
+        attempt_number = recorder.record_attempt()
+        try:
+            resp = await asyncio.to_thread(_call)
+        except BaseException as exc:
+            recorder.record_failed(exc, attempt_number=attempt_number)
+            raise
 
         if resp.status_code != HTTPStatus.OK:
-            task = "multimodal-embedding" if is_multimodal else "text-embedding"
             request_url = (
                 self.base_url.rstrip("/") + f"/services/embeddings/{task}/{task}"
             )
             request_id = getattr(resp, "request_id", "") or ""
-            raise Exception(
+            error = Exception(
                 f"DashScope Embedding API request failed (HTTP {resp.status_code}): "
                 f"{resp.code or '(no code)'} - {resp.message or '(no message)'}"
                 f" [url={request_url}]"
                 + (f" [request_id={request_id}]" if request_id else "")
             )
+            recorder.record_failed(
+                error,
+                attempt_number=attempt_number,
+                status_code=int(resp.status_code),
+            )
+            raise error
+
+        recorder.record_completed(resp, attempt_number=attempt_number)
+        record_outbound_response_summary(usage=getattr(resp, "usage", None))
 
         embeddings = resp.output.get("embeddings", []) if resp.output else []
         if not embeddings:

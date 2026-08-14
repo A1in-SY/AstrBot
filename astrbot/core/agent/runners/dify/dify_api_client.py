@@ -6,6 +6,38 @@ from typing import Any
 from aiohttp import ClientResponse, ClientSession, FormData
 
 from astrbot.core import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    find_trace_span,
+    record_outbound_first_chunk,
+    record_outbound_result_attributes,
+    stable_identifier_hash,
+)
+
+
+def _dify_recorder(
+    *,
+    api_base: str,
+    resource_path: str,
+    payload: dict[str, Any],
+    timeout: float,
+) -> OutboundCallRecorder:
+    """Create one external Agent request recorder on the parent run span."""
+
+    return OutboundCallRecorder(
+        OutboundRequestSnapshot(
+            api_family="dify.agent",
+            sdk_operation="aiohttp.ClientSession.post",
+            base_url=api_base,
+            resource_path=resource_path,
+            route_resolution="constructed",
+            streaming=payload.get("response_mode") == "streaming",
+            timeout_seconds=timeout,
+            parameters=payload,
+        ),
+        span=find_trace_span("agent.run"),
+    )
 
 
 async def _stream_sse(resp: ClientResponse) -> AsyncGenerator[dict, None]:
@@ -56,6 +88,13 @@ class DifyAPIClient:
         payload.pop("self")
         payload.pop("timeout")
         logger.info(f"chat_messages payload: {payload}")
+        recorder = _dify_recorder(
+            api_base=self.api_base,
+            resource_path="/chat-messages",
+            payload=payload,
+            timeout=timeout,
+        )
+        attempt_number = recorder.record_attempt()
         async with self.session.post(
             url,
             json=payload,
@@ -64,11 +103,33 @@ class DifyAPIClient:
         ) as resp:
             if resp.status != 200:
                 text = await resp.text()
+                recorder.record_failed(
+                    RuntimeError(),
+                    attempt_number=attempt_number,
+                    status_code=resp.status,
+                )
                 raise Exception(
                     f"Dify /chat-messages 接口请求失败：{resp.status}. {text}",
                 )
+            event_count = 0
+            remote_run_id = None
             async for event in _stream_sse(resp):
+                event_count += 1
+                if event_count == 1:
+                    record_outbound_first_chunk(event, span=recorder.span)
+                remote_run_id = (
+                    event.get("workflow_run_id")
+                    or event.get("message_id")
+                    or remote_run_id
+                )
                 yield event
+            record_outbound_result_attributes(
+                span=recorder.span,
+                sse_event_count=event_count,
+                remote_run_id_hash=stable_identifier_hash(remote_run_id),
+                partial=False,
+            )
+            recorder.record_completed(resp, attempt_number=attempt_number)
 
     async def workflow_run(
         self,
@@ -85,6 +146,13 @@ class DifyAPIClient:
         payload.pop("self")
         payload.pop("timeout")
         logger.info(f"workflow_run payload: {payload}")
+        recorder = _dify_recorder(
+            api_base=self.api_base,
+            resource_path="/workflows/run",
+            payload=payload,
+            timeout=timeout,
+        )
+        attempt_number = recorder.record_attempt()
         async with self.session.post(
             url,
             json=payload,
@@ -93,11 +161,29 @@ class DifyAPIClient:
         ) as resp:
             if resp.status != 200:
                 text = await resp.text()
+                recorder.record_failed(
+                    RuntimeError(),
+                    attempt_number=attempt_number,
+                    status_code=resp.status,
+                )
                 raise Exception(
                     f"Dify /workflows/run 接口请求失败：{resp.status}. {text}",
                 )
+            event_count = 0
+            remote_run_id = None
             async for event in _stream_sse(resp):
+                event_count += 1
+                if event_count == 1:
+                    record_outbound_first_chunk(event, span=recorder.span)
+                remote_run_id = event.get("workflow_run_id") or remote_run_id
                 yield event
+            record_outbound_result_attributes(
+                span=recorder.span,
+                sse_event_count=event_count,
+                remote_run_id_hash=stable_identifier_hash(remote_run_id),
+                partial=False,
+            )
+            recorder.record_completed(resp, attempt_number=attempt_number)
 
     async def file_upload(
         self,

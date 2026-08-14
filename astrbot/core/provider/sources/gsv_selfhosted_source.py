@@ -4,12 +4,24 @@ import os
 import aiohttp
 
 from astrbot import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+)
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.datetime_utils import generate_timestamp_id
 
 from ..entities import ProviderType
 from ..provider import TTSProvider
 from ..register import register_provider_adapter
+
+
+class _GSVRequestError(Exception):
+    """HTTP failure with an explicit status for content-free diagnostics."""
+
+    def __init__(self, status: int, message: str) -> None:
+        self.status = status
+        super().__init__(message)
 
 
 @register_provider_adapter(
@@ -63,25 +75,46 @@ class ProviderGSVTTS(TTSProvider):
         endpoint: str,
         params=None,
         retries: int = 3,
+        recorder: OutboundCallRecorder | None = None,
     ) -> bytes | None:
         """发起请求"""
         for attempt in range(retries):
+            attempt_number = recorder.record_attempt() if recorder is not None else 0
             logger.debug(f"[GSV TTS] 请求地址：{endpoint}，参数：{params}")
             try:
                 async with self.get_session().get(endpoint, params=params) as response:
                     if response.status != 200:
                         error_text = await response.text()
-                        raise Exception(
+                        raise _GSVRequestError(
+                            response.status,
                             f"[GSV TTS] Request to {endpoint} failed with status {response.status}: {error_text}",
                         )
-                    return await response.read()
+                    result = await response.read()
+                    if recorder is not None:
+                        recorder.record_completed(
+                            response,
+                            attempt_number=attempt_number,
+                        )
+                    return result
             except Exception as e:
                 if attempt < retries - 1:
+                    if recorder is not None:
+                        recorder.record_retry(
+                            e,
+                            attempt_number=attempt_number,
+                            next_attempt_number=attempt_number + 1,
+                            backoff_seconds=1,
+                        )
                     logger.warning(
                         f"[GSV TTS] 请求 {endpoint} 第 {attempt + 1} 次失败：{e}，重试中...",
                     )
                     await asyncio.sleep(1)
                 else:
+                    if recorder is not None:
+                        recorder.record_failed(
+                            e,
+                            attempt_number=attempt_number,
+                        )
                     logger.error(f"[GSV TTS] 请求 {endpoint} 最终失败：{e}")
                     raise
 
@@ -127,7 +160,19 @@ class ProviderGSVTTS(TTSProvider):
 
         logger.debug(f"[GSV TTS] 正在调用语音合成接口，参数：{params}")
 
-        result = await self._make_request(endpoint, params)
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="gpt_sovits.tts",
+                sdk_operation="aiohttp.ClientSession.get",
+                http_method="GET",
+                base_url=self.api_base,
+                resource_path="/tts",
+                route_resolution="constructed",
+                timeout_seconds=self.timeout,
+                parameters=params,
+            )
+        )
+        result = await self._make_request(endpoint, params, recorder=recorder)
         if isinstance(result, bytes):
             with open(path, "wb") as f:
                 f.write(result)

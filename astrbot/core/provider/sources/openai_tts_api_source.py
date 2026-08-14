@@ -4,6 +4,12 @@ import httpx
 from openai import NOT_GIVEN, AsyncOpenAI
 
 from astrbot import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_first_chunk,
+    record_outbound_result_attributes,
+)
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.datetime_utils import generate_timestamp_id
 
@@ -18,6 +24,8 @@ from ..register import register_provider_adapter
     provider_type=ProviderType.TEXT_TO_SPEECH,
 )
 class ProviderOpenAITTSAPI(TTSProvider):
+    _astrbot_deep_outbound = True
+
     def __init__(
         self,
         provider_config: dict,
@@ -48,15 +56,47 @@ class ProviderOpenAITTSAPI(TTSProvider):
     async def get_audio(self, text: str) -> str:
         temp_dir = get_astrbot_temp_path()
         path = os.path.join(temp_dir, f"openai_tts_api_{generate_timestamp_id()}.wav")
-        async with self.client.audio.speech.with_streaming_response.create(
-            model=self.model_name,
-            voice=self.voice,
-            response_format="wav",
-            input=text,
-        ) as response:
-            with open(path, "wb") as f:
-                async for chunk in response.iter_bytes(chunk_size=1024):
-                    f.write(chunk)
+        parameters = {
+            "model": self.model_name,
+            "voice": self.voice,
+            "response_format": "wav",
+            "input": text,
+        }
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="openai.audio.speech",
+                sdk_operation="client.audio.speech.with_streaming_response.create",
+                base_url=str(self.client.base_url),
+                resource_path="/audio/speech",
+                route_resolution="sdk_declared",
+                streaming=True,
+                timeout_seconds=self.provider_config.get("timeout"),
+                proxy_configured=bool(self.provider_config.get("proxy")),
+                parameters=parameters,
+            )
+        )
+        attempt_number = recorder.record_attempt()
+        audio_bytes = 0
+        audio_chunk_count = 0
+        try:
+            async with self.client.audio.speech.with_streaming_response.create(
+                **parameters
+            ) as response:
+                with open(path, "wb") as f:
+                    async for chunk in response.iter_bytes(chunk_size=1024):
+                        if chunk:
+                            record_outbound_first_chunk(response)
+                            audio_chunk_count += 1
+                            audio_bytes += len(chunk)
+                        f.write(chunk)
+                recorder.record_completed(response, attempt_number=attempt_number)
+        except BaseException as exc:
+            recorder.record_failed(exc, attempt_number=attempt_number)
+            raise
+        record_outbound_result_attributes(
+            audio_bytes=audio_bytes,
+            audio_chunk_count=audio_chunk_count,
+        )
         return path
 
     async def terminate(self):

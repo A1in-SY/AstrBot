@@ -5,6 +5,13 @@ from collections.abc import AsyncIterator
 import aiohttp
 
 from astrbot.api import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_first_chunk,
+    record_outbound_result_attributes,
+    split_configured_endpoint,
+)
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.datetime_utils import generate_timestamp_id
 
@@ -19,6 +26,8 @@ from ..register import register_provider_adapter
     provider_type=ProviderType.TEXT_TO_SPEECH,
 )
 class ProviderMiniMaxTTSAPI(TTSProvider):
+    _astrbot_deep_outbound = True
+
     def __init__(
         self,
         provider_config: dict,
@@ -101,6 +110,25 @@ class ProviderMiniMaxTTSAPI(TTSProvider):
 
     async def _call_tts_stream(self, text: str) -> AsyncIterator[str]:
         """进行流式请求"""
+        parameters = json.loads(self._build_tts_stream_body(text))
+        route_base, route_path = split_configured_endpoint(
+            self.api_base,
+            dynamic_path_template="/v1/t2a_v2",
+            static_paths=("/v1/t2a_v2",),
+        )
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="minimax.text_to_audio",
+                sdk_operation="aiohttp.ClientSession.post",
+                base_url=route_base,
+                resource_path=route_path,
+                route_resolution="constructed",
+                streaming=True,
+                timeout_seconds=60,
+                parameters=parameters,
+            )
+        )
+        attempt_number = recorder.record_attempt()
         try:
             async with (
                 aiohttp.ClientSession() as session,
@@ -114,6 +142,7 @@ class ProviderMiniMaxTTSAPI(TTSProvider):
                 response.raise_for_status()
 
                 buffer = b""
+                audio_chunk_count = 0
                 while True:
                     chunk = await response.content.read(8192)
                     if not chunk:
@@ -133,6 +162,8 @@ class ProviderMiniMaxTTSAPI(TTSProvider):
                                         "audio"
                                     )
                                     if audio is not None:
+                                        record_outbound_first_chunk(response)
+                                        audio_chunk_count += 1
                                         yield audio
                                 except json.JSONDecodeError:
                                     logger.warning(
@@ -141,9 +172,15 @@ class ProviderMiniMaxTTSAPI(TTSProvider):
                                     continue
                         except ValueError:
                             buffer = buffer[-1024:]
+                recorder.record_completed(response, attempt_number=attempt_number)
+                record_outbound_result_attributes(audio_chunk_count=audio_chunk_count)
 
         except aiohttp.ClientError as e:
+            recorder.record_failed(e, attempt_number=attempt_number)
             raise Exception(f"MiniMax TTS API请求失败: {e!s}")
+        except BaseException as exc:
+            recorder.record_failed(exc, attempt_number=attempt_number)
+            raise
 
     async def _audio_play(self, audio_stream: AsyncIterator[str]) -> bytes:
         """解码数据流到 audio 比特流"""
@@ -175,6 +212,7 @@ class ProviderMiniMaxTTSAPI(TTSProvider):
             with open(path, "wb") as file:
                 file.write(audio)
 
+            record_outbound_result_attributes(audio_bytes=len(audio))
             return path
 
         except aiohttp.ClientError as e:

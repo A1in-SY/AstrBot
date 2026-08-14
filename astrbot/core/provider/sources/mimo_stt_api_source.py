@@ -1,3 +1,10 @@
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_result_attributes,
+    split_configured_endpoint,
+)
+
 from ..entities import ProviderType
 from ..provider import STTProvider
 from ..register import register_provider_adapter
@@ -22,6 +29,8 @@ from .mimo_api_common import (
     provider_type=ProviderType.SPEECH_TO_TEXT,
 )
 class ProviderMiMoSTTAPI(STTProvider):
+    _astrbot_deep_outbound = True
+
     def __init__(
         self,
         provider_config: dict,
@@ -80,10 +89,29 @@ class ProviderMiMoSTTAPI(STTProvider):
             "messages": self._build_messages(audio_data_url),
             "max_completion_tokens": 1024,
         }
+        request_url = build_api_url(self.api_base)
+        route_base, route_path = split_configured_endpoint(
+            request_url,
+            dynamic_path_template="/chat/completions",
+            static_paths=("/chat/completions", "/v1/chat/completions"),
+        )
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="mimo.chat.completions",
+                sdk_operation="httpx.AsyncClient.post",
+                base_url=route_base,
+                resource_path=route_path,
+                route_resolution="constructed",
+                timeout_seconds=self.timeout,
+                proxy_configured=bool(self.proxy),
+                parameters=payload,
+            )
+        )
+        attempt_number = recorder.record_attempt()
 
         try:
             response = await self.client.post(
-                build_api_url(self.api_base),
+                request_url,
                 headers=build_headers(self.chosen_api_key),
                 json=payload,
             )
@@ -94,8 +122,13 @@ class ProviderMiMoSTTAPI(STTProvider):
                 raise MiMoAPIError(
                     f"MiMo STT API request failed: HTTP {response.status_code}, response: {error_text}"
                 ) from exc
+            recorder.record_completed(response, attempt_number=attempt_number)
 
             data = response.json()
+            record_outbound_result_attributes(
+                recognized_language=data.get("language"),
+                server_duration_seconds=data.get("duration"),
+            )
             choices = data.get("choices") or []
             first_choice = choices[0] if choices else {}
             message = (first_choice or {}).get("message") or {}
@@ -103,6 +136,9 @@ class ProviderMiMoSTTAPI(STTProvider):
             if not isinstance(content, str) or not content.strip():
                 raise MiMoAPIError("MiMo STT API returned empty transcription")
             return content.strip()
+        except BaseException as exc:
+            recorder.record_failed(exc, attempt_number=attempt_number)
+            raise
         finally:
             cleanup_files(cleanup_paths)
 

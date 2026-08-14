@@ -7,6 +7,14 @@ from typing import Any
 import aiohttp
 
 from astrbot.core import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    find_trace_span,
+    record_outbound_first_chunk,
+    record_outbound_result_attributes,
+    stable_identifier_hash,
+)
 
 
 class CozeAPIClient:
@@ -161,6 +169,25 @@ class CozeAPIClient:
 
         logger.debug(f"Coze chat_messages payload: {payload}, params: {params}")
 
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="coze.chat",
+                sdk_operation="aiohttp.ClientSession.post",
+                base_url=self.api_base,
+                resource_path="/v3/chat",
+                route_resolution="constructed",
+                streaming=stream,
+                timeout_seconds=timeout,
+                parameters=payload,
+                input_summary={
+                    "conversation_id_hash": stable_identifier_hash(conversation_id),
+                },
+            ),
+            span=find_trace_span("agent.run"),
+        )
+        attempt_number = recorder.record_attempt()
+        failure_recorded = False
+
         try:
             async with session.post(
                 url,
@@ -169,15 +196,28 @@ class CozeAPIClient:
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as response:
                 if response.status == 401:
+                    recorder.record_failed(
+                        RuntimeError(),
+                        attempt_number=attempt_number,
+                        status_code=response.status,
+                    )
+                    failure_recorded = True
                     raise Exception("Coze API 认证失败，请检查 API Key 是否正确")
 
                 if response.status != 200:
+                    recorder.record_failed(
+                        RuntimeError(),
+                        attempt_number=attempt_number,
+                        status_code=response.status,
+                    )
+                    failure_recorded = True
                     raise Exception(f"Coze API 流式请求失败，状态码: {response.status}")
 
                 # SSE
                 buffer = ""
                 event_type = None
                 event_data = None
+                event_count = 0
 
                 async for chunk in response.content:
                     if chunk:
@@ -190,6 +230,12 @@ class CozeAPIClient:
 
                             if not line:
                                 if event_type and event_data:
+                                    event_count += 1
+                                    if event_count == 1:
+                                        record_outbound_first_chunk(
+                                            event_data,
+                                            span=recorder.span,
+                                        )
                                     yield {"event": event_type, "data": event_data}
                                     event_type = None
                                     event_data = None
@@ -203,9 +249,26 @@ class CozeAPIClient:
                                     except json.JSONDecodeError:
                                         event_data = {"content": data_str}
 
-        except asyncio.TimeoutError:
+                record_outbound_result_attributes(
+                    span=recorder.span,
+                    sse_event_count=event_count,
+                    partial=False,
+                )
+                recorder.record_completed(response, attempt_number=attempt_number)
+
+        except asyncio.TimeoutError as exc:
+            recorder.record_failed(exc, attempt_number=attempt_number)
+            failure_recorded = True
+            record_outbound_result_attributes(
+                span=recorder.span,
+                partial=True,
+                timeout_state=True,
+            )
             raise Exception(f"Coze API 流式请求超时 ({timeout}秒)")
         except Exception as e:
+            if not failure_recorded:
+                recorder.record_failed(e, attempt_number=attempt_number)
+            record_outbound_result_attributes(span=recorder.span, partial=True)
             raise Exception(f"Coze API 流式请求失败: {e!s}")
 
     async def clear_context(self, conversation_id: str):

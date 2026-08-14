@@ -6,6 +6,14 @@ from typing import Any
 from aiohttp import ClientResponse, ClientSession, ClientTimeout
 
 from astrbot.core import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    find_trace_span,
+    record_outbound_first_chunk,
+    record_outbound_result_attributes,
+    stable_identifier_hash,
+)
 
 SSE_MAX_BUFFER_CHARS = 1_048_576
 
@@ -170,6 +178,20 @@ class DeerFlowAPIClient:
         session = self._get_session()
         url = f"{self.api_base}/api/langgraph/threads"
         payload = {"metadata": {}}
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="deerflow.langgraph",
+                sdk_operation="aiohttp.ClientSession.post",
+                base_url=self.api_base,
+                resource_path="/api/langgraph/threads",
+                route_resolution="constructed",
+                timeout_seconds=timeout,
+                proxy_configured=self.proxy is not None,
+                parameters=payload,
+            ),
+            span=find_trace_span("agent.run"),
+        )
+        attempt_number = recorder.record_attempt()
         async with session.post(
             url,
             json=payload,
@@ -179,17 +201,44 @@ class DeerFlowAPIClient:
         ) as resp:
             if resp.status not in (200, 201):
                 text = await resp.text()
-                raise DeerFlowAPIError(
+                error = DeerFlowAPIError(
                     operation="create thread",
                     status=resp.status,
                     body=text,
                     url=url,
                 )
-            return await resp.json()
+                recorder.record_failed(error, attempt_number=attempt_number)
+                raise error
+            result = await resp.json()
+            recorder.record_completed(resp, attempt_number=attempt_number)
+            record_outbound_result_attributes(
+                span=recorder.span,
+                remote_thread_id_hash=stable_identifier_hash(
+                    result.get("thread_id") if isinstance(result, dict) else None
+                ),
+            )
+            return result
 
     async def delete_thread(self, thread_id: str, timeout: float = 20) -> None:
         session = self._get_session()
         url = f"{self.api_base}/api/threads/{thread_id}"
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="deerflow.langgraph",
+                sdk_operation="aiohttp.ClientSession.delete",
+                http_method="DELETE",
+                base_url=self.api_base,
+                resource_path="/api/threads/{thread_id}",
+                route_resolution="constructed",
+                timeout_seconds=timeout,
+                proxy_configured=self.proxy is not None,
+                input_summary={
+                    "thread_id_hash": stable_identifier_hash(thread_id),
+                },
+            ),
+            span=find_trace_span("agent.run"),
+        )
+        attempt_number = recorder.record_attempt()
         async with session.delete(
             url,
             headers=self.headers,
@@ -198,13 +247,16 @@ class DeerFlowAPIClient:
         ) as resp:
             if resp.status not in (200, 202, 204, 404):
                 text = await resp.text()
-                raise DeerFlowAPIError(
+                error = DeerFlowAPIError(
                     operation="delete thread",
                     status=resp.status,
                     body=text,
                     url=url,
                     thread_id=thread_id,
                 )
+                recorder.record_failed(error, attempt_number=attempt_number)
+                raise error
+            recorder.record_completed(resp, attempt_number=attempt_number)
 
     async def stream_run(
         self,
@@ -236,6 +288,25 @@ class DeerFlowAPIClient:
             sock_connect=min(timeout, 30),
             sock_read=timeout,
         )
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="deerflow.langgraph.runs.stream",
+                sdk_operation="aiohttp.ClientSession.post",
+                base_url=self.api_base,
+                resource_path=("/api/langgraph/threads/{thread_id}/runs/stream"),
+                route_resolution="constructed",
+                streaming=True,
+                timeout_seconds=timeout,
+                proxy_configured=self.proxy is not None,
+                parameters=payload,
+                input_summary={
+                    "thread_id_hash": stable_identifier_hash(thread_id),
+                    "message_count": message_count,
+                },
+            ),
+            span=find_trace_span("agent.run"),
+        )
+        attempt_number = recorder.record_attempt()
         async with session.post(
             url,
             json=payload,
@@ -249,15 +320,36 @@ class DeerFlowAPIClient:
         ) as resp:
             if resp.status != 200:
                 text = await resp.text()
-                raise DeerFlowAPIError(
+                error = DeerFlowAPIError(
                     operation="runs/stream request",
                     status=resp.status,
                     body=text,
                     url=url,
                     thread_id=thread_id,
                 )
+                recorder.record_failed(error, attempt_number=attempt_number)
+                raise error
+            event_count = 0
+            remote_run_id = None
             async for event in _stream_sse(resp):
+                event_count += 1
+                if event_count == 1:
+                    record_outbound_first_chunk(event, span=recorder.span)
+                event_data = event.get("data")
+                if isinstance(event_data, dict):
+                    remote_run_id = (
+                        event_data.get("run_id")
+                        or event_data.get("id")
+                        or remote_run_id
+                    )
                 yield event
+            record_outbound_result_attributes(
+                span=recorder.span,
+                sse_event_count=event_count,
+                remote_run_id_hash=stable_identifier_hash(remote_run_id),
+                partial=False,
+            )
+            recorder.record_completed(resp, attempt_number=attempt_number)
 
     async def close(self) -> None:
         session = self._session

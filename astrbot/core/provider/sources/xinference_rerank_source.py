@@ -8,6 +8,10 @@ from xinference_client.client.restful.async_restful_client import (
 )
 
 from astrbot import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+)
 
 from ..entities import ProviderType, RerankResult
 from ..provider import RerankProvider
@@ -20,6 +24,8 @@ from ..register import register_provider_adapter
     provider_type=ProviderType.RERANK,
 )
 class XinferenceRerankProvider(RerankProvider):
+    _astrbot_deep_outbound = True
+
     def __init__(self, provider_config: dict, provider_settings: dict) -> None:
         super().__init__(provider_config, provider_settings)
         self.provider_config = provider_config
@@ -92,8 +98,26 @@ class XinferenceRerankProvider(RerankProvider):
         if not self.model:
             logger.error("Xinference rerank model is not initialized.")
             return []
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="xinference.rerank",
+                sdk_operation="model.rerank",
+                base_url=self.base_url,
+                resource_path="/v1/rerank",
+                route_resolution="sdk_declared",
+                timeout_seconds=self.timeout,
+                parameters={
+                    "model": self.model_name,
+                    "query": query,
+                    "documents": documents,
+                    "top_n": top_n,
+                },
+            )
+        )
+        attempt_number = recorder.record_attempt()
         try:
             response = await self.model.rerank(documents, query, top_n)
+            recorder.record_completed(response, attempt_number=attempt_number)
             results = response.get("results", [])
             logger.debug(f"Rerank API response: {response}")
 
@@ -110,6 +134,7 @@ class XinferenceRerankProvider(RerankProvider):
                 for result in results
             ]
         except Exception as e:
+            recorder.record_failed(e, attempt_number=attempt_number)
             logger.error(f"Xinference rerank failed: {e}")
             logger.debug(f"Xinference rerank failed with exception: {e}", exc_info=True)
             return []

@@ -7,6 +7,14 @@ from httpx import AsyncClient
 from pydantic import BaseModel, conint
 
 from astrbot import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_first_chunk,
+    record_outbound_recovery,
+    record_outbound_result_attributes,
+    stable_identifier_hash,
+)
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.datetime_utils import generate_timestamp_id
 
@@ -44,6 +52,8 @@ class ServeTTSRequest(BaseModel):
     provider_type=ProviderType.TEXT_TO_SPEECH,
 )
 class ProviderFishAudioTTSAPI(TTSProvider):
+    _astrbot_deep_outbound = True
+
     def __init__(
         self,
         provider_config: dict,
@@ -90,15 +100,38 @@ class ProviderFishAudioTTSAPI(TTSProvider):
             base_url=self.api_base.replace("/v1", ""),
             proxy=self.proxy if self.proxy else None,
         ) as client:
-            for sort_by in sort_options:
-                params = {"title": character, "sort_by": sort_by}
-                response = await client.get(
-                    "/model",
-                    params=params,
-                    headers=self.headers,
+            for sort_index, sort_by in enumerate(sort_options):
+                recorder = OutboundCallRecorder(
+                    OutboundRequestSnapshot(
+                        api_family="fishaudio.models.search",
+                        sdk_operation="httpx.AsyncClient.get",
+                        http_method="GET",
+                        base_url=self.api_base.replace("/v1", ""),
+                        resource_path="/model",
+                        route_resolution="constructed",
+                        timeout_seconds=self.timeout,
+                        proxy_configured=bool(self.proxy),
+                        parameters={"query": character, "sort_by": sort_by},
+                    )
                 )
+                attempt_number = recorder.record_attempt()
+                params = {"title": character, "sort_by": sort_by}
+                try:
+                    response = await client.get(
+                        "/model",
+                        params=params,
+                        headers=self.headers,
+                    )
+                except BaseException as exc:
+                    recorder.record_failed(exc, attempt_number=attempt_number)
+                    raise
+                recorder.record_completed(response, attempt_number=attempt_number)
                 resp_data = response.json()
                 if resp_data["total"] == 0:
+                    record_outbound_recovery(
+                        "change_search_sort",
+                        next_sort_index=sort_index + 2,
+                    )
                     continue
                 for item in resp_data["items"]:
                     if character in item["title"]:
@@ -151,6 +184,25 @@ class ProviderFishAudioTTSAPI(TTSProvider):
         )
         self.headers["content-type"] = "application/msgpack"
         request = await self._generate_request(text)
+        parameters = request.model_dump()
+        parameters["model"] = self.get_model()
+        parameters["voice"] = stable_identifier_hash(request.reference_id)
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="fishaudio.tts",
+                sdk_operation="httpx.AsyncClient.stream",
+                base_url=self.api_base,
+                resource_path="/tts",
+                route_resolution="constructed",
+                streaming=True,
+                timeout_seconds=self.timeout,
+                proxy_configured=bool(self.proxy),
+                parameters=parameters,
+            )
+        )
+        attempt_number = recorder.record_attempt()
+        audio_bytes = 0
+        audio_chunk_count = 0
         async with AsyncClient(
             base_url=self.api_base,
             timeout=self.timeout,
@@ -166,10 +218,25 @@ class ProviderFishAudioTTSAPI(TTSProvider):
             ).startswith("audio/"):
                 with open(path, "wb") as f:
                     async for chunk in response.aiter_bytes():
+                        if chunk:
+                            record_outbound_first_chunk(response)
+                            audio_chunk_count += 1
+                            audio_bytes += len(chunk)
                         f.write(chunk)
+                recorder.record_completed(response, attempt_number=attempt_number)
+                record_outbound_result_attributes(
+                    audio_bytes=audio_bytes,
+                    audio_chunk_count=audio_chunk_count,
+                )
                 return path
             error_bytes = await response.aread()
             error_text = error_bytes.decode("utf-8", errors="replace")[:1024]
-            raise Exception(
+            error = Exception(
                 f"Fish Audio API请求失败: 状态码 {response.status_code}, 响应内容: {error_text}"
             )
+            recorder.record_failed(
+                error,
+                attempt_number=attempt_number,
+                status_code=response.status_code,
+            )
+            raise error

@@ -7,8 +7,8 @@ from typing import Final
 
 from astrbot import __version__
 
-A1IN_RELEASE: Final = "a1in-v4.27.2.4"
-A1IN_RELEASE_REVISION: Final = 4
+A1IN_RELEASE: Final = "a1in-v4.27.2.5"
+A1IN_RELEASE_REVISION: Final = 5
 A1IN_UPSTREAM_BASE_TAG: Final = f"v{__version__}"
 A1IN_SOURCE_REVISION_ENV: Final = "A1IN_SOURCE_REVISION"
 A1IN_ALLOW_OFFICIAL_UPDATES_ENV: Final = "A1IN_ALLOW_OFFICIAL_UPDATES"

@@ -101,6 +101,10 @@ ChatUI 支持以下常用能力：
 
 流式输出只保存最终的语义结果，不会逐包保存 SSE 或 WebSocket 增量。页面顶部可以启用或暂停后续采集；也可以按保留策略清理，或手动删除已完成的 Trace。
 
+对于 Core 自己发起的底层调用，Span 详情会按“路由、有效参数、尝试与恢复、响应”分组展示。可查看 API 家族与 SDK 方法、已移除凭据的 base URL 与动态 ID 模板化 path、最终生效的 reasoning/thinking 与 token 上限、transport retry、语义降级、首个语义 chunk 耗时、finish reason、usage，以及 SDK/HTTP 响应明确暴露的状态码和请求 ID。每个内容不同的有效请求只保存一份按需加载、经过脱敏的 `outbound.effective_request` JSON Artifact；该 Artifact 不复制消息、prompt、documents、图片、音频、工具参数、headers、env 或凭据正文。SDK 没有暴露 transport 元数据时，界面明确显示“未暴露”，不会推测 HTTP 200 或请求 ID。
+
+同一诊断视图也会汇总 Agent step 与上下文压缩、Tool/MCP/Skill、内置搜索、外部 Agent、语音、Embedding/Rerank、消息投递、会话历史持久化、脱离请求的后台工具，以及自动 plugin handler/hook。旧 Trace 或未知 operation 仍自动回退到通用 attributes、events 和 Artifact 展示。
+
 ## 更新管理面板
 
 在 AstrBot 启动时，会自动检查管理面板是否需要更新，如果需要，第一条日志（黄色）会进行提示。

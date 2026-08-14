@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import json
+import time
 import traceback
 import typing as T
 import uuid
@@ -67,8 +68,22 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
         task_id: str,
         tool_name: str,
         background_kind: str,
+        submitted_at_monotonic: float,
+        timeout_seconds: int | None,
     ) -> None:
-        """Run one known-detached worker inside its own fail-open Trace root."""
+        """Run one known-detached worker inside its own fail-open Trace root.
+
+        Args:
+            worker: Detached business coroutine.
+            trace_service: Trace service inherited from the submitting context.
+            submitting_trace_id: Source Trace identifier for the spawn link.
+            submitting_span_id: Source span identifier for the spawn link.
+            task_id: Stable background task identifier.
+            tool_name: Submitted tool name.
+            background_kind: Regular tool or handoff worker category.
+            submitted_at_monotonic: Monotonic submission timestamp.
+            timeout_seconds: Effective worker timeout when one is enforced.
+        """
 
         trace_scope: T.Any = None
         trace_root: T.Any = None
@@ -81,6 +96,11 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
                         "task_id": task_id,
                         "tool_name": tool_name,
                         "background_kind": background_kind,
+                        "timeout_seconds": timeout_seconds,
+                        "queue_delay_ms": round(
+                            (time.monotonic() - submitted_at_monotonic) * 1000,
+                            3,
+                        ),
                     },
                 )
                 trace_root = trace_scope.__enter__()
@@ -107,8 +127,25 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
                     pass
 
         try:
+            if trace_root is not None:
+                trace_root.set_attributes(worker_state="running")
             await worker()
         except BaseException as exc:
+            if trace_root is not None:
+                try:
+                    if isinstance(exc, asyncio.CancelledError):
+                        worker_outcome = "cancelled"
+                    elif isinstance(exc, TimeoutError):
+                        worker_outcome = "timeout"
+                    else:
+                        worker_outcome = "error"
+                    trace_root.set_attributes(
+                        worker_state="finished",
+                        worker_outcome=worker_outcome,
+                        exception_type=type(exc).__name__,
+                    )
+                except Exception:
+                    pass
             if trace_scope is not None:
                 try:
                     trace_scope.__exit__(type(exc), exc, exc.__traceback__)
@@ -117,6 +154,35 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
                 trace_scope = None
             raise
         else:
+            if trace_root is not None:
+                try:
+                    states = list(trace_root._trace_state.spans.values())
+                    history_states = [
+                        state
+                        for state in states
+                        if state.operation == "conversation.history.persist"
+                    ]
+                    delivery_states = [
+                        state
+                        for state in states
+                        if state.operation in {"message.send", "response.deliver"}
+                    ]
+                    trace_root.set_attributes(
+                        worker_state="finished",
+                        worker_outcome="completed",
+                        history_persistence_state=(
+                            history_states[-1].status
+                            if history_states
+                            else "not_attempted"
+                        ),
+                        result_delivery_state=(
+                            delivery_states[-1].status
+                            if delivery_states
+                            else "not_attempted"
+                        ),
+                    )
+                except Exception:
+                    pass
             if trace_scope is not None:
                 try:
                     trace_scope.__exit__(None, None, None)
@@ -133,8 +199,19 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
         tool_name: str,
         background_kind: str,
         failure_label: str,
+        timeout_seconds: int | None = None,
     ) -> None:
-        """Schedule a known background boundary without copying its Trace parent."""
+        """Schedule a known background boundary without copying its Trace parent.
+
+        Args:
+            run_context: Agent execution context.
+            worker: Detached business coroutine.
+            task_id: Stable background task identifier.
+            tool_name: Submitted tool name.
+            background_kind: Regular tool or handoff worker category.
+            failure_label: Safe log prefix for detached failures.
+            timeout_seconds: Effective worker timeout when one is enforced.
+        """
 
         active_trace_service = current_trace_service()
         trace_service = active_trace_service or getattr(
@@ -160,6 +237,7 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
         submitting_span_id = (
             submitting_span.span_id if submitting_span is not None else None
         )
+        submitted_at_monotonic = time.monotonic()
 
         async def _run() -> None:
             try:
@@ -171,6 +249,8 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
                     task_id=task_id,
                     tool_name=tool_name,
                     background_kind=background_kind,
+                    submitted_at_monotonic=submitted_at_monotonic,
+                    timeout_seconds=timeout_seconds,
                 )
             except Exception as e:  # noqa: BLE001 - retain existing log-and-return.
                 logger.error(
@@ -319,6 +399,7 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
                 tool_name=tool.name,
                 background_kind="tool",
                 failure_label=f"Background task {task_id}",
+                timeout_seconds=3600,
             )
             text_content = mcp.types.TextContent(
                 type="text",
@@ -554,6 +635,7 @@ class FunctionToolExecutor(BaseFunctionToolExecutor[AstrAgentContext]):
             tool_name=tool.name,
             background_kind="handoff",
             failure_label=f"Background handoff {task_id} ({tool.name})",
+            timeout_seconds=run_context.tool_call_timeout,
         )
 
         text_content = mcp.types.TextContent(

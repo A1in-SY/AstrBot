@@ -5,6 +5,12 @@ from astrbot.core import logger
 from astrbot.core.provider.entities import ProviderType
 from astrbot.core.provider.provider import TTSProvider
 from astrbot.core.provider.register import register_provider_adapter
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_first_chunk,
+    record_outbound_result_attributes,
+)
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.datetime_utils import generate_timestamp_id
 
@@ -20,6 +26,8 @@ except ImportError:
     provider_type=ProviderType.TEXT_TO_SPEECH,
 )
 class GenieTTSProvider(TTSProvider):
+    _astrbot_deep_outbound = True
+
     def __init__(
         self,
         provider_config: dict,
@@ -70,9 +78,29 @@ class GenieTTSProvider(TTSProvider):
             )
 
         try:
-            await loop.run_in_executor(None, _generate, path)
+            recorder = OutboundCallRecorder(
+                OutboundRequestSnapshot(
+                    api_family="genie.local.tts",
+                    sdk_operation="genie.tts",
+                    base_url=None,
+                    resource_path=None,
+                    route_resolution="unavailable",
+                    parameters={
+                        "model": self.character_name,
+                        "text": text,
+                    },
+                )
+            )
+            attempt_number = recorder.record_attempt()
+            try:
+                await loop.run_in_executor(None, _generate, path)
+            except BaseException as exc:
+                recorder.record_failed(exc, attempt_number=attempt_number)
+                raise
 
             if os.path.exists(path):
+                recorder.record_completed(path, attempt_number=attempt_number)
+                record_outbound_result_attributes(audio_bytes=os.path.getsize(path))
                 return path
 
             raise RuntimeError("Genie TTS did not save to file.")
@@ -107,11 +135,36 @@ class GenieTTSProvider(TTSProvider):
                         save_path=save_path,
                     )
 
-                await loop.run_in_executor(None, _generate, path, text)
+                recorder = OutboundCallRecorder(
+                    OutboundRequestSnapshot(
+                        api_family="genie.local.tts",
+                        sdk_operation="genie.tts",
+                        base_url=None,
+                        resource_path=None,
+                        route_resolution="unavailable",
+                        streaming=True,
+                        parameters={
+                            "model": self.character_name,
+                            "text": text,
+                        },
+                    )
+                )
+                attempt_number = recorder.record_attempt()
+                try:
+                    await loop.run_in_executor(None, _generate, path, text)
+                except BaseException as exc:
+                    recorder.record_failed(exc, attempt_number=attempt_number)
+                    raise
 
                 if os.path.exists(path):
                     with open(path, "rb") as f:
                         audio_data = f.read()
+                    recorder.record_completed(path, attempt_number=attempt_number)
+                    record_outbound_first_chunk()
+                    record_outbound_result_attributes(
+                        audio_bytes=len(audio_data),
+                        audio_chunk_count=1,
+                    )
 
                     # Put (text, bytes) into queue so frontend can display text
                     await audio_queue.put((text, audio_data))

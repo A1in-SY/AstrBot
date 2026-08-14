@@ -1,6 +1,12 @@
 import aiohttp
 
 from astrbot import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_response_summary,
+    split_configured_endpoint,
+)
 
 from ..entities import ProviderType, RerankResult
 from ..provider import RerankProvider
@@ -11,6 +17,8 @@ from ..register import register_provider_adapter
     "nvidia_rerank", "NVIDIA Rerank 适配器", provider_type=ProviderType.RERANK
 )
 class NvidiaRerankProvider(RerankProvider):
+    _astrbot_deep_outbound = True
+
     def __init__(self, provider_config: dict, provider_settings: dict) -> None:
         super().__init__(provider_config, provider_settings)
         self.api_key = provider_config.get("nvidia_rerank_api_key", "")
@@ -129,6 +137,22 @@ class NvidiaRerankProvider(RerankProvider):
         try:
             payload = self._build_payload(query, documents)
             request_url = self._get_endpoint()
+            route_base, route_path = split_configured_endpoint(
+                request_url,
+                dynamic_path_template="/v1/retrieval/{model}/reranking",
+            )
+            recorder = OutboundCallRecorder(
+                OutboundRequestSnapshot(
+                    api_family="nvidia.rerank",
+                    sdk_operation="aiohttp.ClientSession.post",
+                    base_url=route_base,
+                    resource_path=route_path,
+                    route_resolution="constructed",
+                    timeout_seconds=self.timeout,
+                    parameters={**payload, "top_n": top_n},
+                )
+            )
+            attempt_number = recorder.record_attempt()
 
             async with client.post(request_url, json=payload) as response:
                 if response.status != 200:
@@ -143,18 +167,30 @@ class NvidiaRerankProvider(RerankProvider):
                         response_data = {"message": error_detail}
 
                     logger.error(f"[NVIDIA Rerank] API Error Response: {response_data}")
-                    raise Exception(f"HTTP {response.status} - {error_detail}")
+                    error = Exception(f"HTTP {response.status} - {error_detail}")
+                    recorder.record_failed(
+                        error,
+                        attempt_number=attempt_number,
+                        status_code=response.status,
+                    )
+                    raise error
 
                 response_data = await response.json()
                 logger.debug(f"[NVIDIA Rerank] API Response: {response_data}")
                 results = self._parse_results(response_data, top_n)
                 self._log_usage(response_data)
+                recorder.record_completed(response, attempt_number=attempt_number)
+                record_outbound_response_summary(usage=response_data.get("usage"))
                 return results
 
         except aiohttp.ClientError as e:
+            if "recorder" in locals():
+                recorder.record_failed(e, attempt_number=attempt_number)
             logger.error(f"[NVIDIA Rerank] Network error: {e}")
             raise Exception(f"Network error: {e}") from e
         except Exception as e:
+            if "recorder" in locals():
+                recorder.record_failed(e, attempt_number=attempt_number)
             logger.error(f"[NVIDIA Rerank] Error: {e}")
             raise Exception(f"Rerank error: {e}") from e
 

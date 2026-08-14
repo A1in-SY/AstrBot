@@ -18,6 +18,11 @@ from astrbot.core.provider.entities import (
     TokenUsage,
     ToolCallsResult,
 )
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_response_summary,
+)
 
 from ..register import register_provider_adapter
 from .openai_source import ProviderOpenAIOfficial
@@ -348,18 +353,39 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
             if key not in self.default_params:
                 extra_body[key] = payloads.pop(key)
 
+        transformations: list[str] = []
+        ignored_fields: list[str] = []
         max_tokens = extra_body.pop("max_tokens", None)
         if max_tokens is not None and "max_output_tokens" not in extra_body:
             extra_body["max_output_tokens"] = max_tokens
+            transformations.append("max_tokens->max_output_tokens")
         reasoning_effort = extra_body.pop("reasoning_effort", None)
         if reasoning_effort is not None and "reasoning" not in extra_body:
             extra_body["reasoning"] = {"effort": reasoning_effort}
-        extra_body.pop("previous_response_id", None)
-        extra_body.pop("conversation", None)
-        extra_body.pop("store", None)
-        payloads.pop("previous_response_id", None)
-        payloads.pop("conversation", None)
+            transformations.append("reasoning_effort->reasoning.effort")
+        for field in ("previous_response_id", "conversation", "store"):
+            if extra_body.pop(field, None) is not None:
+                ignored_fields.append(field)
+        for field in ("previous_response_id", "conversation"):
+            if payloads.pop(field, None) is not None:
+                ignored_fields.append(field)
         payloads["store"] = False
+
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="openai.responses",
+                sdk_operation="client.responses.create",
+                base_url=str(self.client.base_url),
+                resource_path="/responses",
+                route_resolution="sdk_declared",
+                streaming=False,
+                timeout_seconds=self.timeout,
+                proxy_configured=bool(self.provider_config.get("proxy")),
+                parameters={**payloads, "extra_body": extra_body},
+                transformations=tuple(transformations),
+                ignored_fields=tuple(sorted(set(ignored_fields))),
+            )
+        )
 
         response = await retry_provider_request(
             "OpenAI Responses",
@@ -369,6 +395,8 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
                 extra_body=extra_body,
             ),
             max_attempts=request_max_retries,
+            recorder=recorder,
+            _record_terminal_failure=False,
         )
         if not isinstance(response, Response):
             raise TypeError(
@@ -377,7 +405,13 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
             )
 
         logger.debug("response: %s", response)
-        return await self._parse_response(response, tools)
+        result = await self._parse_response(response, tools)
+        record_outbound_response_summary(
+            finish_reason=self._field(response, "status"),
+            usage=result.usage,
+            response_id=result.id,
+        )
+        return result
 
     async def _query_stream(
         self,
@@ -417,18 +451,43 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
             if key not in self.default_params:
                 extra_body[key] = payloads.pop(key)
 
+        transformations: list[str] = []
+        ignored_fields: list[str] = []
         max_tokens = extra_body.pop("max_tokens", None)
         if max_tokens is not None and "max_output_tokens" not in extra_body:
             extra_body["max_output_tokens"] = max_tokens
+            transformations.append("max_tokens->max_output_tokens")
         reasoning_effort = extra_body.pop("reasoning_effort", None)
         if reasoning_effort is not None and "reasoning" not in extra_body:
             extra_body["reasoning"] = {"effort": reasoning_effort}
-        extra_body.pop("previous_response_id", None)
-        extra_body.pop("conversation", None)
-        extra_body.pop("store", None)
-        payloads.pop("previous_response_id", None)
-        payloads.pop("conversation", None)
+            transformations.append("reasoning_effort->reasoning.effort")
+        for field in ("previous_response_id", "conversation", "store"):
+            if extra_body.pop(field, None) is not None:
+                ignored_fields.append(field)
+        for field in ("previous_response_id", "conversation"):
+            if payloads.pop(field, None) is not None:
+                ignored_fields.append(field)
         payloads["store"] = False
+
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="openai.responses",
+                sdk_operation="client.responses.create",
+                base_url=str(self.client.base_url),
+                resource_path="/responses",
+                route_resolution="sdk_declared",
+                streaming=True,
+                timeout_seconds=self.timeout,
+                proxy_configured=bool(self.provider_config.get("proxy")),
+                parameters={
+                    **payloads,
+                    "stream": True,
+                    "extra_body": extra_body,
+                },
+                transformations=tuple(transformations),
+                ignored_fields=tuple(sorted(set(ignored_fields))),
+            )
+        )
 
         stream = await retry_provider_request(
             "OpenAI Responses",
@@ -438,66 +497,88 @@ class ProviderOpenAIResponses(ProviderOpenAIOfficial):
                 extra_body=extra_body,
             ),
             max_attempts=request_max_retries,
+            recorder=recorder,
+            _defer_completion=True,
+            _record_terminal_failure=False,
         )
 
         response_id: str | None = None
-        async for event in stream:
-            event_type = self._field(event, "type", "")
-            event_response = self._field(event, "response")
-            if event_response is not None:
-                response_id = self._field(event_response, "id", response_id)
+        try:
+            async for event in stream:
+                event_type = self._field(event, "type", "")
+                event_response = self._field(event, "response")
+                if event_response is not None:
+                    response_id = self._field(event_response, "id", response_id)
 
-            if event_type == "error":
-                code = self._field(event, "code", "stream_error")
-                message = self._field(event, "message", "Responses stream failed")
-                raise RuntimeError(
-                    f"Responses API stream failed: {code}: {message}. "
-                    f"response_id={response_id}"
-                )
-
-            if event_type in {
-                "response.output_text.delta",
-                "response.refusal.delta",
-            }:
-                delta = self._field(event, "delta", "")
-                if delta:
-                    yield LLMResponse(
-                        "assistant",
-                        result_chain=MessageChain(chain=[Comp.Plain(str(delta))]),
-                        is_chunk=True,
-                        id=response_id,
+                if event_type == "error":
+                    code = self._field(event, "code", "stream_error")
+                    message = self._field(event, "message", "Responses stream failed")
+                    raise RuntimeError(
+                        f"Responses API stream failed: {code}: {message}. "
+                        f"response_id={response_id}"
                     )
-                continue
 
-            if event_type in {
-                "response.reasoning_text.delta",
-                "response.reasoning_summary_text.delta",
-            }:
-                delta = self._field(event, "delta", "")
-                if delta:
-                    yield LLMResponse(
-                        "assistant",
-                        reasoning_content=str(delta),
-                        is_chunk=True,
-                        id=response_id,
+                if event_type in {
+                    "response.output_text.delta",
+                    "response.refusal.delta",
+                }:
+                    delta = self._field(event, "delta", "")
+                    if delta:
+                        yield LLMResponse(
+                            "assistant",
+                            result_chain=MessageChain(chain=[Comp.Plain(str(delta))]),
+                            is_chunk=True,
+                            id=response_id,
+                        )
+                    continue
+
+                if event_type in {
+                    "response.reasoning_text.delta",
+                    "response.reasoning_summary_text.delta",
+                }:
+                    delta = self._field(event, "delta", "")
+                    if delta:
+                        yield LLMResponse(
+                            "assistant",
+                            reasoning_content=str(delta),
+                            is_chunk=True,
+                            id=response_id,
+                        )
+                    continue
+
+                if event_type in {
+                    "response.completed",
+                    "response.incomplete",
+                    "response.failed",
+                }:
+                    if event_response is None:
+                        raise EmptyModelOutputError(
+                            "Responses stream terminal event has no response: "
+                            f"{event_type}"
+                        )
+                    response = await self._parse_response(event_response, tools)
+                    recorder.record_completed(
+                        event_response,
+                        attempt_number=recorder.last_attempt_number,
                     )
-                continue
-
-            if event_type in {
-                "response.completed",
-                "response.incomplete",
-                "response.failed",
-            }:
-                if event_response is None:
-                    raise EmptyModelOutputError(
-                        f"Responses stream terminal event has no response: {event_type}"
+                    record_outbound_response_summary(
+                        finish_reason=self._field(event_response, "status", event_type),
+                        usage=response.usage,
+                        response_id=response.id,
                     )
-                yield await self._parse_response(event_response, tools)
-                return
+                    yield response
+                    return
 
-        raise EmptyModelOutputError(
-            f"Responses stream ended without a terminal event. response_id={response_id}"
-        )
+            raise EmptyModelOutputError(
+                "Responses stream ended without a terminal event. "
+                f"response_id={response_id}"
+            )
+        except BaseException as error:
+            recorder.record_failed(
+                error,
+                attempt_number=recorder.last_attempt_number,
+            )
+            raise
 
     async def _parse_response(
         self,

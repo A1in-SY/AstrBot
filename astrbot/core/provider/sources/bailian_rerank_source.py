@@ -5,6 +5,12 @@ from urllib.parse import urlsplit
 import aiohttp
 
 from astrbot import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_response_summary,
+    split_configured_endpoint,
+)
 
 from ..entities import ProviderType, RerankResult
 from ..provider import RerankProvider
@@ -40,6 +46,7 @@ class BailianRerankProvider(RerankProvider):
         "/compatible-api/v1/reranks",
         "/compatible-mode/v1/reranks",
     )
+    _astrbot_deep_outbound = True
 
     def __init__(self, provider_config: dict, provider_settings: dict) -> None:
         super().__init__(provider_config, provider_settings)
@@ -242,6 +249,37 @@ class BailianRerankProvider(RerankProvider):
         try:
             # 构建请求载荷，如果top_n为None则返回所有重排序结果
             payload = self._build_payload(query, documents, top_n)
+            route_base, route_path = split_configured_endpoint(
+                self.base_url,
+                dynamic_path_template="/{configured_rerank_path}",
+                static_paths=(
+                    "/api/v1/services/rerank/text-rerank/text-rerank",
+                    *self.COMPATIBLE_API_PATH_SUFFIXES,
+                ),
+            )
+            recorder = OutboundCallRecorder(
+                OutboundRequestSnapshot(
+                    api_family=(
+                        "bailian.rerank.compatible"
+                        if self._uses_compatible_api()
+                        else "bailian.rerank.native"
+                    ),
+                    sdk_operation="aiohttp.ClientSession.post",
+                    base_url=route_base,
+                    resource_path=route_path,
+                    route_resolution="constructed",
+                    timeout_seconds=self.timeout,
+                    parameters={**payload, "top_n": top_n},
+                    ignored_fields=(
+                        ("return_documents",)
+                        if self.return_documents
+                        and self.model.strip().lower() == self.QWEN3_RERANK_MODEL
+                        and self._uses_compatible_api()
+                        else ()
+                    ),
+                )
+            )
+            attempt_number = recorder.record_attempt()
 
             logger.debug(
                 f"百炼 Rerank 请求: query='{query[:50]}...', 文档数量={len(documents)}"
@@ -258,15 +296,23 @@ class BailianRerankProvider(RerankProvider):
 
                 logger.debug(f"百炼 Rerank 成功返回 {len(results)} 个结果")
 
+                recorder.record_completed(response, attempt_number=attempt_number)
+                record_outbound_response_summary(usage=response_data.get("usage"))
                 return results
 
         except aiohttp.ClientError as e:
+            if "recorder" in locals():
+                recorder.record_failed(e, attempt_number=attempt_number)
             error_msg = f"网络请求失败: {e}"
             logger.error(f"百炼 Rerank 网络请求失败: {e}")
             raise BailianNetworkError(error_msg) from e
-        except BailianRerankError:
+        except BailianRerankError as exc:
+            if "recorder" in locals():
+                recorder.record_failed(exc, attempt_number=attempt_number)
             raise
         except Exception as e:
+            if "recorder" in locals():
+                recorder.record_failed(e, attempt_number=attempt_number)
             error_msg = f"重排序失败: {e}"
             logger.error(f"百炼 Rerank 处理失败: {e}")
             raise BailianRerankError(error_msg) from e

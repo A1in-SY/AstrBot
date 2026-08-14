@@ -535,6 +535,14 @@ async def run_live_agent(
                 audio_chunk_count=tts_audio_chunk_count,
                 audio_bytes=tts_audio_bytes,
                 first_frame_seconds=tts_first_frame_time or None,
+                time_to_first_frame_ms=(
+                    round(tts_first_frame_time * 1000, 3)
+                    if tts_first_frame_time
+                    else None
+                ),
+                provider_call_count=1,
+                pipeline_retry_count=0,
+                final_mode=("native_stream" if support_stream else "simulated_stream"),
             )
             if isinstance(tts_result, asyncio.CancelledError):
                 trace_span.finish(status="cancelled", outcome="cancelled")

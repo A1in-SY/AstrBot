@@ -4,6 +4,12 @@ from xinference_client.client.restful.async_restful_client import (
 )
 
 from astrbot.core import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_result_attributes,
+    stable_identifier_hash,
+)
 from astrbot.core.utils.media_utils import MediaResolver
 
 from ..entities import ProviderType
@@ -17,6 +23,8 @@ from ..register import register_provider_adapter
     provider_type=ProviderType.SPEECH_TO_TEXT,
 )
 class ProviderXinferenceSTT(STTProvider):
+    _astrbot_deep_outbound = True
+
     def __init__(self, provider_config: dict, provider_settings: dict) -> None:
         super().__init__(provider_config, provider_settings)
         self.provider_config = provider_config
@@ -105,6 +113,29 @@ class ProviderXinferenceSTT(STTProvider):
                     filename="audio.wav",
                     content_type="audio/wav",
                 )
+                recorder = OutboundCallRecorder(
+                    OutboundRequestSnapshot(
+                        api_family="xinference.audio.transcriptions",
+                        sdk_operation="aiohttp.ClientSession.post",
+                        base_url=self.base_url,
+                        resource_path="/v1/audio/transcriptions",
+                        route_resolution="constructed",
+                        timeout_seconds=self.timeout,
+                        parameters={
+                            "model": self.model_name,
+                            "audio": audio_bytes,
+                        },
+                        input_summary={
+                            "audio_source_type": "resolved_media",
+                            "audio_bytes": len(audio_bytes),
+                            "remote_resource_id_hash": stable_identifier_hash(
+                                self.model_uid
+                            ),
+                        },
+                        transformations=("configured_model->runtime_model_uid",),
+                    )
+                )
+                attempt_number = recorder.record_attempt()
 
                 async with self.client.session.post(
                     url,
@@ -116,14 +147,29 @@ class ProviderXinferenceSTT(STTProvider):
                         result = await resp.json()
                         text = result.get("text", "")
                         logger.debug(f"Xinference STT result: {text}")
+                        recorder.record_completed(resp, attempt_number=attempt_number)
+                        record_outbound_result_attributes(
+                            recognized_language=result.get("language"),
+                            server_duration_seconds=result.get("duration"),
+                        )
                         return text
                     error_text = await resp.text()
+                    error = Exception(
+                        f"Xinference STT transcription failed with status {resp.status}"
+                    )
+                    recorder.record_failed(
+                        error,
+                        attempt_number=attempt_number,
+                        status_code=resp.status,
+                    )
                     logger.error(
                         f"Xinference STT transcription failed with status {resp.status}: {error_text}",
                     )
                     return ""
 
         except Exception as e:
+            if "recorder" in locals():
+                recorder.record_failed(e, attempt_number=attempt_number)
             logger.error(f"Xinference STT failed: {e}")
             logger.debug(f"Xinference STT failed with exception: {e}", exc_info=True)
             return ""

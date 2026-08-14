@@ -7,12 +7,14 @@ import contextlib
 import contextvars
 import functools
 import inspect
+import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 
 from astrbot.core.message.message_event_result import MessageChain
 
 from .context import current_trace_service
+from .outbound import extract_response_metadata, stable_identifier_hash
 from .serialization import message_chain_manifest
 from .service import NoopTraceSpan, TraceSpan
 
@@ -58,6 +60,7 @@ def instrument_message_event(event: Any) -> None:
             return await original_send(message, *args, **kwargs)
         with span:
             try:
+                _record_delivery_request(span, message)
                 span.record_json(
                     "message.outgoing",
                     message_chain_manifest(message),
@@ -65,7 +68,22 @@ def instrument_message_event(event: Any) -> None:
                 )
             except Exception:
                 span.mark_degraded("message_serialization_failed")
-            return await original_send(message, *args, **kwargs)
+            started_at = time.monotonic()
+            try:
+                result = await original_send(message, *args, **kwargs)
+            except BaseException as exc:
+                _record_delivery_error(span, exc)
+                raise
+            span.set_attributes(
+                delivery_duration_ms=round(
+                    (time.monotonic() - started_at) * 1000,
+                    3,
+                ),
+                return_type=type(result).__name__,
+                platform_message_id_hash=_platform_message_id_hash(result),
+            )
+            _record_delivery_transport_metadata(span, result)
+            return result
 
     traced_send_streaming_fn: Callable[..., Awaitable[Any]] | None = None
     if inspect.iscoroutinefunction(original_send_streaming):
@@ -97,7 +115,10 @@ def instrument_message_event(event: Any) -> None:
                 span = service.start_span(
                     "response.deliver",
                     kind="delivery",
-                    attributes=_delivery_attributes(event, streaming=True),
+                    attributes={
+                        **_delivery_attributes(event, streaming=True),
+                        "fallback_requested": use_fallback,
+                    },
                 )
             except Exception:
                 return await original_send_streaming(
@@ -120,12 +141,22 @@ def instrument_message_event(event: Any) -> None:
             try:
                 with span:
                     try:
-                        return await original_send_streaming(
+                        result = await original_send_streaming(
                             proxy,
                             use_fallback,
                             *args,
                             **kwargs,
                         )
+                    except BaseException as exc:
+                        _record_delivery_error(span, exc)
+                        raise
+                    else:
+                        span.set_attributes(
+                            return_type=type(result).__name__,
+                            platform_message_id_hash=_platform_message_id_hash(result),
+                        )
+                        _record_delivery_transport_metadata(span, result)
+                        return result
                     finally:
                         _record_stream_delivery(span, accumulator)
             finally:
@@ -176,7 +207,68 @@ def _delivery_attributes(event: Any, *, streaming: bool) -> dict[str, Any]:
         "platform_name": getattr(getattr(event, "platform_meta", None), "name", None),
         "umo": getattr(event, "unified_msg_origin", None),
         "streaming": streaming,
+        "event_class": type(event).__name__,
+        "adapter_method": f"{type(event).__name__}.{'send_streaming' if streaming else 'send'}",
     }
+
+
+def _record_delivery_request(span: TraceSpan, message: MessageChain | None) -> None:
+    """Attach component counts without copying outgoing component bodies."""
+
+    if message is None:
+        span.set_attributes(component_count=0, component_types=[])
+        return
+    span.set_attributes(
+        component_count=len(message.chain),
+        component_types=sorted(
+            {
+                str(getattr(component, "type", type(component).__name__))
+                for component in message.chain
+            }
+        ),
+        semantic_chunk_count=1,
+    )
+
+
+def _record_delivery_error(span: TraceSpan, error: BaseException) -> None:
+    """Classify delivery termination without persisting exception text."""
+
+    if isinstance(error, asyncio.CancelledError):
+        category = "cancelled"
+    elif isinstance(error, TimeoutError) or "timeout" in type(error).__name__.lower():
+        category = "timeout"
+    else:
+        category = "exception"
+    span.set_attributes(
+        exception_type=type(error).__name__,
+        error_category=category,
+    )
+
+
+def _platform_message_id_hash(result: Any) -> str | None:
+    """Hash an ID only when the adapter explicitly exposes one in its result."""
+
+    if isinstance(result, dict):
+        value = result.get("message_id") or result.get("messageId")
+    else:
+        value = getattr(result, "message_id", None) or getattr(
+            result, "messageId", None
+        )
+    return stable_identifier_hash(value)
+
+
+def _record_delivery_transport_metadata(span: TraceSpan, result: Any) -> None:
+    """Keep only transport metadata explicitly returned by an adapter."""
+
+    status_code, request_id = extract_response_metadata(result)
+    attributes: dict[str, Any] = {}
+    if status_code is not None:
+        attributes["status_code"] = status_code
+    if request_id is not None:
+        attributes["remote_request_id"] = request_id
+    if attributes:
+        attributes["transport_metadata_available"] = True
+        span.set_attributes(**attributes)
 
 
 async def _stream_proxy(
@@ -220,6 +312,8 @@ class _StreamingDeliveryAccumulator:
     """Collect a bounded final semantic summary without persisting stream deltas."""
 
     def __init__(self) -> None:
+        self.started_at = time.monotonic()
+        self.first_chain_ms: float | None = None
         self.chain_count = 0
         self.audio_chunk_count = 0
         self.reasoning_parts: list[str] = []
@@ -235,6 +329,11 @@ class _StreamingDeliveryAccumulator:
         """
 
         self.chain_count += 1
+        if self.first_chain_ms is None:
+            self.first_chain_ms = round(
+                (time.monotonic() - self.started_at) * 1000,
+                3,
+            )
         if chain.type == "audio_chunk":
             self.audio_chunk_count += 1
             return
@@ -268,6 +367,7 @@ class _StreamingDeliveryAccumulator:
             "reasoning": "".join(self.reasoning_parts),
             "component_types": sorted(self.component_types),
             "text_truncated": self.text_truncated,
+            "time_to_first_delivery_chunk_ms": self.first_chain_ms,
         }
 
 
@@ -283,6 +383,9 @@ def _record_stream_delivery(
             chain_count=manifest["chain_count"],
             audio_chunk_count=manifest["audio_chunk_count"],
             text_truncated=manifest["text_truncated"],
+            component_types=manifest["component_types"],
+            semantic_chunk_count=manifest["chain_count"],
+            time_to_first_delivery_chunk_ms=manifest["time_to_first_delivery_chunk_ms"],
         )
         span.record_json(
             "response.delivery",

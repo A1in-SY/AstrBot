@@ -48,12 +48,13 @@ from astrbot.core.provider.modalities import (
 )
 from astrbot.core.provider.provider import Provider
 from astrbot.core.trace.context import current_trace_service
+from astrbot.core.trace.outbound import record_active_outbound_failure
 from astrbot.core.trace.serialization import (
     call_tool_result_manifest,
     function_tool_manifest,
     normalize_trace_value,
 )
-from astrbot.core.trace.service import NoopTraceSpan
+from astrbot.core.trace.service import NoopTraceSpan, TraceSpan
 from astrbot.core.utils.async_generator import closing_async_generator
 
 from ..context.compressor import ContextCompressor
@@ -261,6 +262,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         self.agent_hooks = agent_hooks
         self.run_context = run_context
         self._trace_model_call_index = 0
+        self._astrbot_trace_tool_call_count = 0
+        self._astrbot_trace_forced_final = False
         self.request_context_manager_config = ContextConfig(
             # <=0 disables token-based guarding.
             max_context_tokens=provider.provider_config.get("max_context_tokens", 0),
@@ -1153,6 +1156,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             )
             # 再执行最后一步
             self._astrbot_trace_step_kind = "forced_final"
+            self._astrbot_trace_forced_final = True
             step_responses = self.step()
             async with closing_async_generator(step_responses):
                 async for resp in step_responses:
@@ -1394,16 +1398,32 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                                     func_tool_name, tool_call_streak
                                 ),
                             )
-                except _ToolExecutionInterrupted:
+                except _ToolExecutionInterrupted as exc:
+                    record_active_outbound_failure(
+                        exc,
+                        span=tool_span if isinstance(tool_span, TraceSpan) else None,
+                    )
                     tool_span.finish(status="cancelled", outcome="interrupted")
                     raise
-                except asyncio.CancelledError:
+                except asyncio.CancelledError as exc:
+                    record_active_outbound_failure(
+                        exc,
+                        span=tool_span if isinstance(tool_span, TraceSpan) else None,
+                    )
                     tool_span.finish(status="cancelled", outcome="cancelled")
                     raise
-                except GeneratorExit:
+                except GeneratorExit as exc:
+                    record_active_outbound_failure(
+                        exc,
+                        span=tool_span if isinstance(tool_span, TraceSpan) else None,
+                    )
                     tool_span.finish(status="cancelled", outcome="generator_closed")
                     raise
                 except BaseException as exc:
+                    record_active_outbound_failure(
+                        exc,
+                        span=tool_span if isinstance(tool_span, TraceSpan) else None,
+                    )
                     tool_span.set_attributes(exception_type=type(exc).__name__)
                     tool_span.finish(status="error", outcome="exception")
                     raise
@@ -1653,6 +1673,9 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         """Create the one logical tool/MCP/Skill span for an Agent decision."""
 
         trace_service = current_trace_service()
+        self._astrbot_trace_tool_call_count = (
+            getattr(self, "_astrbot_trace_tool_call_count", 0) + 1
+        )
         if trace_service is None:
             return NoopTraceSpan()
         origin = _unwrap_trace_tool(tool)
@@ -1668,8 +1691,42 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                     "background_submission": bool(
                         getattr(origin, "is_background_task", False)
                     ),
+                    "tool_timeout_seconds": self.run_context.tool_call_timeout,
+                    "execution_mode": (
+                        "background_submission"
+                        if getattr(origin, "is_background_task", False)
+                        else "foreground"
+                    ),
                 },
             )
+            if isinstance(origin, MCPTool):
+                config = getattr(origin.mcp_client, "_mcp_server_config", {}) or {}
+                transport = "stdio"
+                remote_host = None
+                remote_path = None
+                if isinstance(config, dict) and config.get("url"):
+                    from astrbot.core.trace.outbound import split_configured_endpoint
+
+                    remote_base, remote_path = split_configured_endpoint(
+                        config["url"],
+                        dynamic_path_template="/{configured_mcp_path}",
+                        static_paths=("/", "/mcp", "/sse"),
+                    )
+                    transport = str(
+                        config.get("transport") or config.get("type") or "sse"
+                    )
+                    if remote_base:
+                        from urllib.parse import urlsplit
+
+                        remote_host = urlsplit(remote_base).hostname
+                span.set_attributes(
+                    mcp_server_name=origin.mcp_server_name,
+                    mcp_transport=transport,
+                    mcp_remote_host=remote_host,
+                    mcp_resource_path=remote_path,
+                    mcp_protocol_method="tools/call",
+                    mcp_connection_ready=origin.mcp_client.session is not None,
+                )
             span.record_json("tool.definition", function_tool_manifest(origin))
             span.record_json(
                 "tool.arguments.raw",
@@ -1704,6 +1761,22 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             span.set_attributes(
                 executor_yield_count=executor_yield_count,
                 result_kind=result_manifest["result_type"],
+                result_block_count=(
+                    len(getattr(final_result, "content", []) or [])
+                    if final_result is not None
+                    else 0
+                ),
+                result_block_types=(
+                    sorted(
+                        {
+                            str(getattr(item, "type", type(item).__name__))
+                            for item in (getattr(final_result, "content", []) or [])
+                        }
+                    )
+                    if final_result is not None
+                    else []
+                ),
+                agent_visible_result_count=len(agent_visible_result_blocks),
             )
             span.record_json("tool.result", result_manifest)
             span.record_json(

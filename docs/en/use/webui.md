@@ -101,6 +101,10 @@ The top-level `Trace` page in the admin panel shows durable execution observatio
 
 Streaming output stores only the final semantic result rather than every SSE or WebSocket increment. The page header can enable or pause future capture, run retention cleanup, or remove completed Traces manually.
 
+For Core-owned outbound calls, the Span detail dialog separates route, effective parameters, attempts/recoveries, and response metadata. It can show the API family and SDK operation, a credential-free base URL and templated resource path, final reasoning/thinking and token-limit controls, transport retries, semantic fallbacks, first semantic-chunk latency, finish reason, usage, and explicitly exposed status/request IDs. Each materially different request payload is stored once as a lazily loaded, sanitized `outbound.effective_request` JSON Artifact; message, prompt, document, image, audio, tool-argument, header, environment, and credential bodies are not copied into this Artifact. When an SDK does not expose transport metadata, the field is shown as unavailable instead of inferring an HTTP 200 or request ID.
+
+The same diagnostic view also summarizes Agent steps and context compression, Tool/MCP/Skill execution, built-in search calls, external Agents, speech and embedding/rerank providers, message delivery, conversation-history persistence, detached background tools, and automatic plugin handlers/hooks. Older Traces and unknown operations continue to use the generic attributes, events, and Artifact view.
+
 ## Updating the Admin Panel
 
 When AstrBot starts, it automatically checks if the admin panel needs updating. If it does, the first log entry (in yellow) will prompt you.

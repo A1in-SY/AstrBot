@@ -391,13 +391,34 @@ class EmbeddingProvider(AbstractProvider):
                         return
                     except Exception as e:
                         if attempt == max_retries - 1:
+                            try:
+                                from astrbot.core.trace.outbound import (
+                                    record_active_outbound_failure,
+                                )
+
+                                record_active_outbound_failure(e)
+                            except Exception:
+                                pass
                             # 最后一次重试失败，记录失败的批次
                             failed_batches.append((batch_idx, batch_texts))
                             raise Exception(
                                 f"批次 {batch_idx} 处理失败，已重试 {max_retries} 次: {e!s}",
                             )
                         # 等待一段时间后重试，使用指数退避
-                        await asyncio.sleep(2**attempt)
+                        backoff_seconds = 2**attempt
+                        try:
+                            from astrbot.core.trace.outbound import (
+                                record_active_outbound_retry,
+                            )
+
+                            record_active_outbound_retry(
+                                e,
+                                next_attempt_number=None,
+                                backoff_seconds=backoff_seconds,
+                            )
+                        except Exception:
+                            pass
+                        await asyncio.sleep(backoff_seconds)
 
         tasks = []
         for i in range(0, len(texts), batch_size):

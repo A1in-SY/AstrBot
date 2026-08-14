@@ -23,6 +23,13 @@ from astrbot.core.provider.entities import (
     TokenUsage,
 )
 from astrbot.core.provider.func_tool_manager import ToolSet
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_active_outbound_failure,
+    record_outbound_recovery,
+    record_outbound_response_summary,
+)
 from astrbot.core.utils.media_utils import (
     describe_media_ref,
     resolve_media_ref_to_base64_data,
@@ -149,6 +156,10 @@ class ProviderGoogleGenAI(Provider):
             keys.remove(self.chosen_api_key)
             if len(keys) > 0:
                 self.set_key(random.choice(keys))
+                record_outbound_recovery(
+                    "rotate_credential",
+                    credential_rotated=True,
+                )
                 logger.warning(
                     "Retrying with a different API key due to detected key issue: %s. Current key: %s...",
                     e.message,
@@ -160,6 +171,7 @@ class ProviderGoogleGenAI(Provider):
                 "No valid API keys remaining. Current key: %s...",
                 self.chosen_api_key[:12],
             )
+            record_active_outbound_failure(e)
             raise Exception("Gemini API rate limit reached or API key issue detected.")
 
         # 连接错误处理
@@ -167,6 +179,7 @@ class ProviderGoogleGenAI(Provider):
             proxy = self.provider_config.get("proxy", "")
             log_connection_failure("Gemini", e, proxy)
 
+        record_active_outbound_failure(e)
         raise e
 
     async def _prepare_query_config(
@@ -633,6 +646,24 @@ class ProviderGoogleGenAI(Provider):
                     modalities,
                     temperature,
                 )
+                config_parameters = config.model_dump(exclude_none=True)
+                recorder = OutboundCallRecorder(
+                    OutboundRequestSnapshot(
+                        api_family="gemini.models.generate_content",
+                        sdk_operation="client.models.generate_content",
+                        base_url=self.api_base,
+                        resource_path="/models/{model}:generateContent",
+                        route_resolution="sdk_declared",
+                        streaming=False,
+                        timeout_seconds=self.timeout,
+                        proxy_configured=bool(self.provider_config.get("proxy")),
+                        parameters={
+                            "model": model,
+                            "contents": conversation,
+                            "generation_config": config_parameters,
+                        },
+                    )
+                )
                 result = await retry_provider_request(
                     "Gemini",
                     lambda: self.client.models.generate_content(
@@ -641,6 +672,8 @@ class ProviderGoogleGenAI(Provider):
                         config=config,
                     ),
                     max_attempts=request_max_retries,
+                    recorder=recorder,
+                    _record_terminal_failure=False,
                 )
                 logger.debug(f"genai result: {result}")
 
@@ -656,6 +689,11 @@ class ProviderGoogleGenAI(Provider):
                             "Temperature exceeded the maximum value of 2, but Gemini recitation still occurred."
                         )
                     temperature += 0.2
+                    record_outbound_recovery(
+                        "increase_temperature_after_recitation",
+                        attempt_number=recorder.last_attempt_number,
+                        temperature=temperature,
+                    )
                     logger.warning(
                         f"Gemini recitation detected; increasing temperature to {temperature:.1f} and retrying...",
                     )
@@ -671,11 +709,19 @@ class ProviderGoogleGenAI(Provider):
                         f"{model} does not support system prompts; removing it automatically. This may affect persona settings.",
                     )
                     system_instruction = None
+                    record_outbound_recovery(
+                        "remove_system_instruction",
+                        attempt_number=recorder.last_attempt_number,
+                    )
                 elif "Function calling is not enabled" in e.message:
                     logger.warning(
                         f"{model} does not support function calling; removing tools automatically."
                     )
                     tools = None
+                    record_outbound_recovery(
+                        "disable_tools",
+                        attempt_number=recorder.last_attempt_number,
+                    )
                 elif (
                     "Multi-modal output is not supported" in e.message
                     or "Model does not support the requested response modalities"
@@ -686,9 +732,19 @@ class ProviderGoogleGenAI(Provider):
                         f"{model} does not support multimodal output; falling back to TEXT modality.",
                     )
                     modalities = ["TEXT"]
+                    record_outbound_recovery(
+                        "fallback_to_text_modality",
+                        attempt_number=recorder.last_attempt_number,
+                    )
                 else:
                     raise
                 continue
+            except BaseException as error:
+                recorder.record_failed(
+                    error,
+                    attempt_number=recorder.last_attempt_number,
+                )
+                raise
 
         llm_response = LLMResponse("assistant")
         llm_response.raw_completion = result
@@ -699,6 +755,11 @@ class ProviderGoogleGenAI(Provider):
         llm_response.id = result.response_id
         if result.usage_metadata:
             llm_response.usage = self._extract_usage(result.usage_metadata)
+        record_outbound_response_summary(
+            finish_reason=result.candidates[0].finish_reason,
+            usage=llm_response.usage,
+            response_id=result.response_id,
+        )
         return llm_response
 
     async def _query_stream(
@@ -725,6 +786,25 @@ class ProviderGoogleGenAI(Provider):
                     payloads.get("tool_choice", "auto"),
                     system_instruction,
                 )
+                config_parameters = config.model_dump(exclude_none=True)
+                recorder = OutboundCallRecorder(
+                    OutboundRequestSnapshot(
+                        api_family="gemini.models.generate_content",
+                        sdk_operation="client.models.generate_content_stream",
+                        base_url=self.api_base,
+                        resource_path="/models/{model}:streamGenerateContent",
+                        route_resolution="sdk_declared",
+                        streaming=True,
+                        timeout_seconds=self.timeout,
+                        proxy_configured=bool(self.provider_config.get("proxy")),
+                        parameters={
+                            "model": model,
+                            "contents": conversation,
+                            "stream": True,
+                            "generation_config": config_parameters,
+                        },
+                    )
+                )
                 result = await retry_provider_request(
                     "Gemini",
                     lambda: self.client.models.generate_content_stream(
@@ -733,6 +813,9 @@ class ProviderGoogleGenAI(Provider):
                         config=config,
                     ),
                     max_attempts=request_max_retries,
+                    recorder=recorder,
+                    _defer_completion=True,
+                    _record_terminal_failure=False,
                 )
                 break
             except APIError as e:
@@ -743,75 +826,113 @@ class ProviderGoogleGenAI(Provider):
                         f"{model} does not support system prompts; removing it automatically. This may affect persona settings.",
                     )
                     system_instruction = None
+                    record_outbound_recovery(
+                        "remove_system_instruction",
+                        attempt_number=recorder.last_attempt_number,
+                    )
                 elif "Function calling is not enabled" in e.message:
                     logger.warning(
                         f"{model} does not support function calling; removing tools automatically."
                     )
                     tools = None
+                    record_outbound_recovery(
+                        "disable_tools",
+                        attempt_number=recorder.last_attempt_number,
+                    )
                 else:
                     raise
                 continue
+            except BaseException as error:
+                recorder.record_failed(
+                    error,
+                    attempt_number=recorder.last_attempt_number,
+                )
+                raise
 
         # Accumulate the complete response text for the final response
         accumulated_text = ""
         accumulated_reasoning = ""
         final_response = None
 
-        async for chunk in result:
-            llm_response = LLMResponse("assistant", is_chunk=True)
+        last_finish_reason = None
+        try:
+            async for chunk in result:
+                llm_response = LLMResponse("assistant", is_chunk=True)
 
-            if not chunk.candidates:
-                logger.warning(f"Gemini stream chunk has empty candidates: {chunk}")
-                continue
-            if not chunk.candidates[0].content:
-                logger.warning(f"Gemini stream chunk has empty content: {chunk}")
-                continue
+                if not chunk.candidates:
+                    logger.warning(f"Gemini stream chunk has empty candidates: {chunk}")
+                    continue
+                if not chunk.candidates[0].content:
+                    logger.warning(f"Gemini stream chunk has empty content: {chunk}")
+                    continue
 
-            if chunk.candidates[0].content.parts and any(
-                part.function_call for part in chunk.candidates[0].content.parts
-            ):
-                llm_response = LLMResponse("assistant", is_chunk=False)
-                llm_response.raw_completion = chunk
-                llm_response.result_chain = self._process_content_parts(
-                    chunk.candidates[0],
-                    llm_response,
-                    validate_output=False,
-                )
-                llm_response.id = chunk.response_id
-                if chunk.usage_metadata:
-                    llm_response.usage = self._extract_usage(chunk.usage_metadata)
-                yield llm_response
-                return
-
-            _f = False
-
-            # 提取 reasoning content
-            reasoning = self._extract_reasoning_content(chunk.candidates[0])
-            if reasoning:
-                _f = True
-                accumulated_reasoning += reasoning
-                llm_response.reasoning_content = reasoning
-            if chunk.text:
-                _f = True
-                accumulated_text += chunk.text
-                llm_response.result_chain = MessageChain(chain=[Comp.Plain(chunk.text)])
-            if _f:
-                yield llm_response
-
-            if chunk.candidates[0].finish_reason:
-                # Process the final chunk for potential tool calls or other content
-                if chunk.candidates[0].content.parts:
-                    final_response = LLMResponse("assistant", is_chunk=False)
-                    final_response.raw_completion = chunk
-                    final_response.result_chain = self._process_content_parts(
+                if chunk.candidates[0].content.parts and any(
+                    part.function_call for part in chunk.candidates[0].content.parts
+                ):
+                    llm_response = LLMResponse("assistant", is_chunk=False)
+                    llm_response.raw_completion = chunk
+                    llm_response.result_chain = self._process_content_parts(
                         chunk.candidates[0],
-                        final_response,
+                        llm_response,
                         validate_output=False,
                     )
-                    final_response.id = chunk.response_id
+                    llm_response.id = chunk.response_id
                     if chunk.usage_metadata:
-                        final_response.usage = self._extract_usage(chunk.usage_metadata)
-                break
+                        llm_response.usage = self._extract_usage(chunk.usage_metadata)
+                    last_finish_reason = chunk.candidates[0].finish_reason
+                    recorder.record_completed(
+                        chunk,
+                        attempt_number=recorder.last_attempt_number,
+                    )
+                    record_outbound_response_summary(
+                        finish_reason=last_finish_reason,
+                        usage=llm_response.usage,
+                        response_id=chunk.response_id,
+                    )
+                    yield llm_response
+                    return
+
+                _f = False
+
+                # 提取 reasoning content
+                reasoning = self._extract_reasoning_content(chunk.candidates[0])
+                if reasoning:
+                    _f = True
+                    accumulated_reasoning += reasoning
+                    llm_response.reasoning_content = reasoning
+                if chunk.text:
+                    _f = True
+                    accumulated_text += chunk.text
+                    llm_response.result_chain = MessageChain(
+                        chain=[Comp.Plain(chunk.text)]
+                    )
+                if _f:
+                    yield llm_response
+
+                if chunk.candidates[0].finish_reason:
+                    last_finish_reason = chunk.candidates[0].finish_reason
+                    # Process the final chunk for potential tool calls or other content
+                    if chunk.candidates[0].content.parts:
+                        final_response = LLMResponse("assistant", is_chunk=False)
+                        final_response.raw_completion = chunk
+                        final_response.result_chain = self._process_content_parts(
+                            chunk.candidates[0],
+                            final_response,
+                            validate_output=False,
+                        )
+                        final_response.id = chunk.response_id
+                        if chunk.usage_metadata:
+                            final_response.usage = self._extract_usage(
+                                chunk.usage_metadata
+                            )
+                    break
+            recorder.record_completed(
+                result,
+                attempt_number=recorder.last_attempt_number,
+            )
+        except BaseException as error:
+            recorder.record_failed(error, attempt_number=recorder.last_attempt_number)
+            raise
 
         # Yield final complete response with accumulated text
         if not final_response:
@@ -831,6 +952,12 @@ class ProviderGoogleGenAI(Provider):
             final_response,
             response_id=getattr(final_response, "id", None),
             finish_reason=None,
+        )
+
+        record_outbound_response_summary(
+            finish_reason=last_finish_reason,
+            usage=final_response.usage,
+            response_id=final_response.id,
         )
 
         yield final_response

@@ -72,6 +72,11 @@ class LoadSkillTool(FunctionTool[AstrAgentContext]):
         """
         skill = self.skills_by_name.get(name)
         if skill is None:
+            self._record_trace_status(
+                skill_name=name,
+                status="error",
+                error_category="not_available",
+            )
             return f"Error: skill `{name}` is not available in this session."
 
         try:
@@ -97,15 +102,50 @@ class LoadSkillTool(FunctionTool[AstrAgentContext]):
                 if not isinstance(content, str):
                     raise RuntimeError("sandbox returned non-text skill content")
             else:
+                self._record_trace_status(
+                    skill_name=skill.name,
+                    status="error",
+                    error_category="unsupported_runtime",
+                )
                 return "Error: Skill loading requires the local or sandbox runtime."
         except Exception as exc:  # noqa: BLE001 - return a normal tool result
             logger.warning("Failed to load skill %s: %s", skill.name, exc)
+            self._record_trace_status(
+                skill_name=skill.name,
+                status="error",
+                error_category=(
+                    "read_error"
+                    if isinstance(exc, OSError)
+                    else "parse_or_runtime_error"
+                ),
+                exception_type=type(exc).__name__,
+            )
             return f"Error: failed to load skill `{skill.name}`."
 
         try:
             trace_service = current_trace_service()
             if trace_service is not None:
-                trace_service.current_span().record_text(
+                span = trace_service.current_span()
+                span.set_attributes(
+                    skill_name=skill.name,
+                    skill_source_type=skill.source_type,
+                    skill_source=skill.source_label,
+                    skill_runtime=self.runtime,
+                    skill_content_bytes=len(content.encode("utf-8")),
+                    skill_line_count=len(content.splitlines()),
+                    skill_reference_count=sum(
+                        content.count(marker)
+                        for marker in (
+                            "references/",
+                            "scripts/",
+                            "templates/",
+                            "examples/",
+                        )
+                    ),
+                    skill_asset_count=content.count("assets/"),
+                    skill_load_status="success",
+                )
+                span.record_text(
                     "skill_definition",
                     content,
                     metadata={
@@ -116,3 +156,26 @@ class LoadSkillTool(FunctionTool[AstrAgentContext]):
         except Exception:  # noqa: BLE001 - tracing must never affect tool output
             pass
         return content
+
+    @staticmethod
+    def _record_trace_status(
+        *,
+        skill_name: str,
+        status: str,
+        error_category: str,
+        exception_type: str | None = None,
+    ) -> None:
+        """Attach content-free failure diagnostics to the existing skill span."""
+
+        try:
+            trace_service = current_trace_service()
+            if trace_service is None:
+                return
+            trace_service.current_span().set_attributes(
+                skill_name=skill_name,
+                skill_load_status=status,
+                skill_error_category=error_category,
+                exception_type=exception_type,
+            )
+        except Exception:
+            return

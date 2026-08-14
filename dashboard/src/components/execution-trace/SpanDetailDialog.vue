@@ -59,6 +59,187 @@ const spanDuration = computed(() =>
 );
 const hasAttributes = computed(() => Object.keys(props.span?.attributes || {}).length > 0);
 
+type DiagnosticEntry = { key: string; label: string; value: string };
+type DiagnosticGroup = { key: string; label: string; entries: DiagnosticEntry[] };
+
+const OUTBOUND_ROUTE_FIELDS = [
+  'api_family', 'sdk_operation', 'http_method', 'base_url', 'resource_path',
+  'route_resolution', 'streaming', 'timeout_seconds', 'proxy_configured',
+] as const;
+const OUTBOUND_PARAMETER_FIELDS = [
+  'provider_id', 'provider_type', 'requested_model', 'effective_model', 'model',
+  'temperature', 'top_p', 'top_k', 'seed', 'presence_penalty', 'frequency_penalty',
+  'stop_count', 'response_format', 'modalities', 'tool_count', 'tool_choice',
+  'tool_choice_name', 'parallel_tool_calls', 'token_limit_field', 'token_limit_value',
+  'reasoning_effort', 'thinking_type', 'thinking_budget_tokens', 'thinking_budget',
+  'thinking_level', 'store', 'dimensions', 'encoding_format', 'language', 'voice',
+  'speed', 'sample_rate', 'top_n', 'return_documents',
+] as const;
+const OUTBOUND_ATTEMPT_FIELDS = [
+  'request_variant_count', 'attempt_count', 'retry_count', 'recovery_count',
+  'parameter_transformation_count', 'ignored_parameter_count',
+] as const;
+const OUTBOUND_RESPONSE_FIELDS = [
+  'status_code', 'remote_request_id', 'transport_metadata_available',
+  'time_to_first_chunk_ms', 'response_chunk_count', 'finish_reason', 'response_id_hash',
+  'usage_input_tokens', 'usage_input_cached_tokens', 'usage_input_other_tokens',
+  'usage_output_tokens', 'usage_total_tokens', 'result_chars', 'audio_bytes',
+  'audio_chunk_count', 'audio_duration_seconds', 'time_to_first_frame_ms',
+  'recognized_language', 'server_duration_seconds',
+  'vector_count', 'embedding_dimensions', 'result_count', 'score_min', 'score_max',
+  'search_result_count', 'sse_event_count', 'remote_run_id_hash', 'partial',
+] as const;
+
+const DOMAIN_FIELDS: Record<string, readonly string[]> = {
+  agent: [
+    'runner', 'capture_scope', 'initial_message_count', 'available_tool_count',
+    'tool_timeout_seconds', 'max_steps', 'step_count', 'model_call_count',
+    'tool_call_count', 'final_message_count', 'forced_final', 'aborted',
+    'messages_before', 'messages_after', 'context_tokens_before',
+    'context_tokens_after', 'context_tokens_estimate', 'yield_count',
+    'termination_reason', 'trigger_reason', 'compressor', 'tokens_before',
+    'tokens_after', 'retained_message_count', 'summarized_message_count',
+    'dropped_message_count', 'compression_model_call_count',
+    'fallback_truncation', 'retained_token_ratio',
+    'external_agent', 'external_api_mode', 'remote_resource_id_hash', 'plan_mode',
+    'subagent_enabled',
+  ],
+  tool: [
+    'tool_name', 'tool_class', 'execution_mode', 'tool_timeout_seconds',
+    'executor_yield_count', 'result_kind', 'result_block_count', 'result_block_types',
+    'agent_visible_result_count', 'background_submission',
+  ],
+  mcp: [
+    'mcp_server_name', 'mcp_transport', 'mcp_remote_host', 'mcp_resource_path',
+    'mcp_protocol_method', 'mcp_connection_ready', 'reconnect_count', 'mcp_is_error',
+    'mcp_error_code',
+  ],
+  pipeline: [
+    'message_type', 'component_count', 'component_type_counts', 'has_reply',
+    'has_media', 'activated_handler_count', 'stopped', 'result_type',
+    'input_candidate_count', 'provider_call_count', 'pipeline_retry_count',
+    'converted_count', 'fallback_to_text_count', 'final_mode',
+    'audio_bytes', 'audio_chunk_count', 'time_to_first_frame_ms',
+  ],
+  delivery: [
+    'event_class', 'adapter_method', 'platform_id', 'platform_name', 'streaming',
+    'fallback_requested', 'fallback_used', 'component_count', 'component_types',
+    'semantic_chunk_count', 'time_to_first_delivery_chunk_ms', 'return_type',
+    'platform_message_id_hash', 'error_category',
+  ],
+  history: [
+    'trigger_source', 'conversation_id_hash', 'pending_message_count',
+    'role_distribution', 'checkpoint_present', 'checkpoint_count',
+    'token_usage_present', 'write_performed', 'write_result', 'skip_reason',
+  ],
+  plugin: [
+    'plugin_name', 'plugin_version', 'handler_full_name', 'event_type', 'priority',
+    'invocation_index', 'yield_count', 'result_mutation', 'termination_category',
+    'exception_type',
+  ],
+  skill: [
+    'skill_name', 'skill_source_type', 'skill_source', 'skill_runtime',
+    'skill_content_bytes', 'skill_line_count', 'skill_reference_count',
+    'skill_asset_count', 'skill_load_status', 'skill_error_category',
+  ],
+  background: [
+    'task_id', 'tool_name', 'background_kind', 'queue_delay_ms', 'worker_state',
+    'worker_outcome', 'history_persistence_state', 'result_delivery_state',
+  ],
+};
+
+function diagnosticValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') {
+    return tm('diagnostics.unavailable');
+  }
+  if (typeof value === 'object') {
+    return safeExecutionTraceJson(value);
+  }
+  return String(value);
+}
+
+function diagnosticEntries(fields: readonly string[], includeMissing = false): DiagnosticEntry[] {
+  const attributes = props.span?.attributes || {};
+  return fields
+    .filter((key) => includeMissing || Object.prototype.hasOwnProperty.call(attributes, key))
+    .map((key) => ({
+      key,
+      label: diagnosticFieldLabel(key),
+      value: diagnosticValue(attributes[key]),
+    }));
+}
+
+function diagnosticFieldLabel(key: string): string {
+  const translated = tm(`diagnostics.fields.${key}`);
+  return translated.startsWith('[MISSING:') ? key : translated;
+}
+
+function domainGroupKey(operation: string): string | null {
+  if (operation === 'tool.background.run') return 'background';
+  if (operation === 'conversation.history.persist') return 'history';
+  if (operation === 'message.send' || operation === 'response.deliver') return 'delivery';
+  if (operation === 'mcp.tool.call') return 'mcp';
+  if (operation === 'skill.load') return 'skill';
+  if (operation === 'plugin.handler' || operation === 'plugin.hook') return 'plugin';
+  if (operation.startsWith('agent.')) return 'agent';
+  if (operation === 'tool.call') return 'tool';
+  if (operation === 'message.process' || operation.endsWith('.pipeline')) return 'pipeline';
+  return null;
+}
+
+const diagnosticGroups = computed<DiagnosticGroup[]>(() => {
+  if (!props.span) return [];
+  const groups: DiagnosticGroup[] = [];
+  const hasOutbound = Object.prototype.hasOwnProperty.call(props.span.attributes || {}, 'api_family');
+  const routeEntries = diagnosticEntries(OUTBOUND_ROUTE_FIELDS, hasOutbound);
+  const parameterEntries = diagnosticEntries(OUTBOUND_PARAMETER_FIELDS);
+  const attemptEntries = diagnosticEntries(OUTBOUND_ATTEMPT_FIELDS, hasOutbound);
+  const responseEntries = diagnosticEntries(OUTBOUND_RESPONSE_FIELDS, hasOutbound);
+  for (const [key, entries] of [
+    ['route', routeEntries],
+    ['parameters', parameterEntries],
+    ['attempts', attemptEntries],
+    ['response', responseEntries],
+  ] as const) {
+    if (entries.length) groups.push({ key, label: tm(`diagnostics.groups.${key}`), entries });
+  }
+  const domainKey = domainGroupKey(props.span.operation);
+  if (domainKey) {
+    const entries = diagnosticEntries(DOMAIN_FIELDS[domainKey] || []);
+    if (entries.length) {
+      groups.unshift({ key: domainKey, label: tm(`diagnostics.groups.${domainKey}`), entries });
+    }
+  }
+  return groups;
+});
+
+const outboundTimeline = computed(() =>
+  spanEvents.value.filter((event) => event.name.startsWith('outbound.')),
+);
+
+function eventRelativeTime(event: ExecutionTraceEvent): string {
+  if (!props.span) return '–';
+  const elapsedMs = Math.max(0, (Number(event.occurred_at) - Number(props.span.started_at)) * 1000);
+  return `+${elapsedMs.toFixed(elapsedMs < 10 ? 2 : 0)} ms`;
+}
+
+function outboundEventLabel(name: string): string {
+  const key = name.split('.').join('_');
+  const translated = tm(`diagnostics.events.${key}`);
+  return translated.startsWith('[MISSING:') ? name : translated;
+}
+
+function artifactVariantLabel(artifactRef: ExecutionTraceArtifactRef): string | null {
+  if (artifactRef.role !== 'outbound.effective_request') return null;
+  const metadata = artifactRef.metadata || {};
+  const variant = String(metadata.variant_index ?? '–');
+  const schema = String(metadata.schema_version ?? '–');
+  const sanitized = metadata.sanitized === true
+    ? tm('diagnostics.sanitized')
+    : tm('diagnostics.sanitizationUnknown');
+  return tm('diagnostics.variant', { variant, schema, sanitized });
+}
+
 watch(
   () => `${props.modelValue}:${props.span?.trace_id || ''}:${props.span?.span_id || ''}`,
   () => {
@@ -238,6 +419,48 @@ function retryArtifactContent(artifactRef: ExecutionTraceArtifactRef): void {
             </div>
           </dl>
 
+          <section v-if="diagnosticGroups.length" class="detail-section diagnostics-section">
+            <h3>{{ tm('diagnostics.title') }}</h3>
+            <div class="diagnostic-groups">
+              <article v-for="group in diagnosticGroups" :key="group.key" class="diagnostic-card">
+                <h4>{{ group.label }}</h4>
+                <dl class="diagnostic-grid">
+                  <div v-for="entry in group.entries" :key="entry.key">
+                    <dt>{{ entry.label }}</dt>
+                    <dd :class="{ mono: entry.key.includes('url') || entry.key.includes('path') }">
+                      {{ entry.value }}
+                    </dd>
+                  </div>
+                </dl>
+              </article>
+            </div>
+          </section>
+
+          <section v-if="outboundTimeline.length" class="detail-section">
+            <h3>{{ tm('diagnostics.timeline') }} <span>{{ outboundTimeline.length }}</span></h3>
+            <ol class="attempt-timeline">
+              <li
+                v-for="event in outboundTimeline"
+                :key="`${event.span_id}-${event.event_index}`"
+                :class="`is-${event.name.split('.').slice(-1)[0] || 'event'}`"
+              >
+                <span class="timeline-dot" />
+                <div class="timeline-content">
+                  <div class="record-head">
+                    <strong>{{ outboundEventLabel(event.name) }}</strong>
+                    <span>{{ eventRelativeTime(event) }}</span>
+                  </div>
+                  <dl v-if="Object.keys(event.attributes || {}).length" class="timeline-attributes">
+                    <div v-for="(value, key) in event.attributes" :key="key">
+                      <dt>{{ diagnosticFieldLabel(String(key)) }}</dt>
+                      <dd>{{ diagnosticValue(value) }}</dd>
+                    </div>
+                  </dl>
+                </div>
+              </li>
+            </ol>
+          </section>
+
           <section v-if="hasAttributes" class="detail-section">
             <h3>{{ tm('detail.attributes') }}</h3>
             <pre class="json-block">{{ safeExecutionTraceJson(span.attributes) }}</pre>
@@ -273,7 +496,12 @@ function retryArtifactContent(artifactRef: ExecutionTraceArtifactRef): void {
                 class="record-card"
               >
                 <div class="record-head">
-                  <strong>{{ artifactRef.role }}</strong>
+                  <div class="artifact-title">
+                    <strong>{{ artifactRef.role }}</strong>
+                    <small v-if="artifactVariantLabel(artifactRef)">
+                      {{ artifactVariantLabel(artifactRef) }}
+                    </small>
+                  </div>
                   <span>{{ artifactRef.media_type || 'application/octet-stream' }}</span>
                 </div>
                 <dl class="reference-grid">
@@ -489,6 +717,133 @@ function retryArtifactContent(artifactRef: ExecutionTraceArtifactRef): void {
   font-weight: 500;
 }
 
+.diagnostic-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.diagnostic-card {
+  min-width: 0;
+  padding: 13px 14px;
+  border: 1px solid var(--dashboard-border);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(var(--v-theme-primary), 0.04), transparent 55%);
+}
+
+.diagnostic-card h4 {
+  margin: 0 0 11px;
+  color: rgb(var(--v-theme-primary));
+  font-size: 12px;
+  letter-spacing: 0.03em;
+}
+
+.diagnostic-grid {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.diagnostic-grid > div {
+  display: grid;
+  grid-template-columns: minmax(100px, 0.72fr) minmax(0, 1.28fr);
+  gap: 10px;
+}
+
+.diagnostic-grid dt,
+.timeline-attributes dt {
+  color: var(--dashboard-muted);
+  font-size: 11px;
+}
+
+.diagnostic-grid dd,
+.timeline-attributes dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.attempt-timeline {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.attempt-timeline li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 8px;
+  min-height: 48px;
+}
+
+.attempt-timeline li:not(:last-child)::before {
+  position: absolute;
+  top: 18px;
+  bottom: -2px;
+  left: 6px;
+  width: 1px;
+  background: var(--dashboard-border);
+  content: '';
+}
+
+.timeline-dot {
+  z-index: 1;
+  width: 13px;
+  height: 13px;
+  margin-top: 3px;
+  border: 3px solid rgb(var(--v-theme-surface));
+  border-radius: 50%;
+  background: rgb(var(--v-theme-primary));
+  box-shadow: 0 0 0 1px var(--dashboard-border);
+}
+
+.attempt-timeline .is-retry .timeline-dot,
+.attempt-timeline .is-recovered .timeline-dot {
+  background: rgb(var(--v-theme-warning));
+}
+
+.attempt-timeline .is-failed .timeline-dot {
+  background: rgb(var(--v-theme-error));
+}
+
+.attempt-timeline .is-completed .timeline-dot {
+  background: rgb(var(--v-theme-success));
+}
+
+.timeline-content {
+  min-width: 0;
+  padding: 0 0 14px;
+}
+
+.timeline-attributes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 14px;
+  margin: 6px 0 0;
+}
+
+.timeline-attributes > div {
+  display: flex;
+  gap: 5px;
+}
+
+.artifact-title {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.artifact-title small {
+  color: var(--dashboard-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
 .record-list {
   display: grid;
   gap: 10px;
@@ -603,8 +958,14 @@ function retryArtifactContent(artifactRef: ExecutionTraceArtifactRef): void {
 
 @media (max-width: 640px) {
   .detail-grid,
-  .reference-grid {
+  .reference-grid,
+  .diagnostic-groups {
     grid-template-columns: 1fr;
+  }
+
+  .diagnostic-grid > div {
+    grid-template-columns: 1fr;
+    gap: 2px;
   }
 
   .record-head {

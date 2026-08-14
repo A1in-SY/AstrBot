@@ -1,5 +1,10 @@
 import aiohttp
 
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+)
+
 from ..entities import ProviderType, RerankResult
 from ..provider import RerankProvider
 from ..register import register_provider_adapter
@@ -11,6 +16,8 @@ from ..register import register_provider_adapter
     provider_type=ProviderType.RERANK,
 )
 class VLLMRerankProvider(RerankProvider):
+    _astrbot_deep_outbound = True
+
     def __init__(self, provider_config: dict, provider_settings: dict) -> None:
         super().__init__(provider_config, provider_settings)
         self.provider_config = provider_config
@@ -52,31 +59,49 @@ class VLLMRerankProvider(RerankProvider):
             payload["top_n"] = top_n
         assert self.client is not None
         rerank_url = f"{self.base_url}{self.api_suffix}"
-        async with self.client.post(
-            rerank_url,
-            json=payload,
-        ) as response:
-            response.raise_for_status()
-            response_data = await response.json()
-            if not isinstance(response_data, dict):
-                raise ValueError("Rerank API response must be a JSON object")
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="vllm.rerank",
+                sdk_operation="aiohttp.ClientSession.post",
+                base_url=self.base_url,
+                resource_path=self.api_suffix,
+                route_resolution="constructed",
+                timeout_seconds=getattr(self, "timeout", None),
+                parameters=payload,
+            )
+        )
+        attempt_number = recorder.record_attempt()
+        try:
+            async with self.client.post(
+                rerank_url,
+                json=payload,
+            ) as response:
+                response.raise_for_status()
+                response_data = await response.json()
+                if not isinstance(response_data, dict):
+                    raise ValueError("Rerank API response must be a JSON object")
 
-            results = response_data.get("results")
-            if not isinstance(results, list) or not results:
-                raise ValueError(
-                    "Rerank API response must contain a non-empty 'results' list"
-                )
-
-            try:
-                return [
-                    RerankResult(
-                        index=result["index"],
-                        relevance_score=result["relevance_score"],
+                results = response_data.get("results")
+                if not isinstance(results, list) or not results:
+                    raise ValueError(
+                        "Rerank API response must contain a non-empty 'results' list"
                     )
-                    for result in results
-                ]
-            except (KeyError, TypeError) as exc:
-                raise ValueError("Rerank API returned invalid result data") from exc
+
+                try:
+                    parsed = [
+                        RerankResult(
+                            index=result["index"],
+                            relevance_score=result["relevance_score"],
+                        )
+                        for result in results
+                    ]
+                except (KeyError, TypeError) as exc:
+                    raise ValueError("Rerank API returned invalid result data") from exc
+                recorder.record_completed(response, attempt_number=attempt_number)
+                return parsed
+        except BaseException as exc:
+            recorder.record_failed(exc, attempt_number=attempt_number)
+            raise
 
     async def terminate(self) -> None:
         """关闭客户端会话"""

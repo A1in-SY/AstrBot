@@ -3,6 +3,11 @@ from pathlib import Path
 import httpx
 
 from astrbot import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_result_attributes,
+)
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.datetime_utils import generate_timestamp_id
 
@@ -77,6 +82,8 @@ def _validate_output_format(output_format: str) -> None:
     provider_type=ProviderType.TEXT_TO_SPEECH,
 )
 class ProviderElevenLabsTTSAPI(TTSProvider):
+    _astrbot_deep_outbound = True
+
     def __init__(
         self,
         provider_config: dict,
@@ -148,17 +155,45 @@ class ProviderElevenLabsTTSAPI(TTSProvider):
         if self.voice_settings:
             payload["voice_settings"] = self.voice_settings
 
-        response = await self.client.post(
-            url,
-            headers=headers,
-            params={"output_format": self.output_format},
-            json=payload,
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="elevenlabs.text_to_speech",
+                sdk_operation="httpx.AsyncClient.post",
+                base_url=self.api_base,
+                resource_path="/text-to-speech/{voice_id}",
+                route_resolution="constructed",
+                timeout_seconds=self.provider_config.get("timeout", 20),
+                proxy_configured=bool(self.provider_config.get("proxy")),
+                parameters={
+                    **payload,
+                    "voice": self.voice_id,
+                    "output_format": self.output_format,
+                },
+            )
         )
+        attempt_number = recorder.record_attempt()
+        try:
+            response = await self.client.post(
+                url,
+                headers=headers,
+                params={"output_format": self.output_format},
+                json=payload,
+            )
+        except BaseException as exc:
+            recorder.record_failed(exc, attempt_number=attempt_number)
+            raise
         if response.status_code != 200:
             error_text = response.text[:1024]
-            raise Exception(
+            error = Exception(
                 f"ElevenLabs TTS API 请求失败: {response.status_code}, {error_text}"
             )
+            recorder.record_failed(
+                error,
+                attempt_number=attempt_number,
+                status_code=response.status_code,
+            )
+            raise error
+        recorder.record_completed(response, attempt_number=attempt_number)
 
         temp_dir = Path(get_astrbot_temp_path())
         temp_dir.mkdir(parents=True, exist_ok=True)
@@ -167,6 +202,7 @@ class ProviderElevenLabsTTSAPI(TTSProvider):
             / f"elevenlabs_tts_api_{generate_timestamp_id()}.{self._output_extension()}"
         )
         path.write_bytes(response.content)
+        record_outbound_result_attributes(audio_bytes=len(response.content))
         return str(path)
 
     async def terminate(self):

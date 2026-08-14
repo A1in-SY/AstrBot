@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import traceback
 import typing as T
@@ -154,6 +155,9 @@ async def call_event_hook(
                 materialize=False,
                 attributes={
                     "handler": handler.handler_name,
+                    "handler_full_name": handler.handler_full_name,
+                    "plugin_name": plugin.name if plugin is not None else None,
+                    "plugin_version": (plugin.version if plugin is not None else None),
                     "event_type": hook_type.name,
                     "priority": handler.extras_configs.get("priority", 0),
                     "invocation_index": invocation_index,
@@ -193,7 +197,16 @@ async def call_event_hook(
                         "plugin.hook.completed",
                         result_mutation=result_mutation,
                     )
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(trace_span, TraceSpan):
+                trace_span.set_attributes(
+                    termination_category=(
+                        "cancelled"
+                        if isinstance(exc, asyncio.CancelledError)
+                        else "exception"
+                    ),
+                    exception_type=type(exc).__name__,
+                )
             if trace_service is not None:
                 trace_service.materialize()
             logger.error(traceback.format_exc())

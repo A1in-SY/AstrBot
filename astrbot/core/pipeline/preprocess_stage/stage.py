@@ -199,6 +199,7 @@ class PreProcessStage(Stage):
                 )
                 retry = 5
                 attempts = 0
+                provider_call_count = 0
                 failure: str | None = None
                 with trace_span:
                     trace_span.record_json(
@@ -210,6 +211,7 @@ class PreProcessStage(Stage):
                     )
                     for i in range(retry):
                         attempts += 1
+                        provider_call_count += 1
                         try:
                             if isinstance(trace_span, NoopTraceSpan) and trace_service:
                                 with trace_service.suppress():
@@ -221,6 +223,8 @@ class PreProcessStage(Stage):
                                 logger.info(f"Speech-to-text{suffix} result: " + result)
                                 trace_span.set_attributes(
                                     attempt_count=attempts,
+                                    provider_call_count=provider_call_count,
+                                    pipeline_retry_count=max(0, attempts - 1),
                                     result_present=True,
                                     result_chars=len(result),
                                 ).set_outcome("transcribed")
@@ -251,6 +255,8 @@ class PreProcessStage(Stage):
                             break
                     trace_span.set_attributes(
                         attempt_count=attempts,
+                        provider_call_count=provider_call_count,
+                        pipeline_retry_count=max(0, attempts - 1),
                         result_present=False,
                     )
                     if failure:

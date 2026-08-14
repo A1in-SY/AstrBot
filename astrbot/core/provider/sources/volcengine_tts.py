@@ -8,6 +8,12 @@ import uuid
 import aiohttp
 
 from astrbot import logger
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_result_attributes,
+    split_configured_endpoint,
+)
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.datetime_utils import generate_timestamp_id
 
@@ -22,6 +28,8 @@ from ..register import register_provider_adapter
     provider_type=ProviderType.TEXT_TO_SPEECH,
 )
 class ProviderVolcengineTTS(TTSProvider):
+    _astrbot_deep_outbound = True
+
     def __init__(self, provider_config: dict, provider_settings: dict) -> None:
         super().__init__(provider_config, provider_settings)
         self.api_key = provider_config.get("api_key", "")
@@ -68,6 +76,29 @@ class ProviderVolcengineTTS(TTSProvider):
         }
 
         payload = self._build_request_payload(text)
+        route_base, route_path = split_configured_endpoint(
+            self.api_base,
+            dynamic_path_template="/api/v1/tts",
+            static_paths=("/api/v1/tts",),
+        )
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="volcengine.tts",
+                sdk_operation="aiohttp.ClientSession.post",
+                base_url=route_base,
+                resource_path=route_path,
+                route_resolution="constructed",
+                timeout_seconds=self.timeout,
+                parameters={
+                    "model": self.cluster,
+                    "text": text,
+                    "voice": self.voice_type,
+                    "speed": self.speed_ratio,
+                    "response_format": "mp3",
+                },
+            )
+        )
+        attempt_number = recorder.record_attempt()
 
         logger.debug(f"请求头: {headers}")
         logger.debug(f"请求 URL: {self.api_base}")
@@ -107,14 +138,31 @@ class ProviderVolcengineTTS(TTSProvider):
                             lambda: open(file_path, "wb").write(audio_data),
                         )
 
+                        recorder.record_completed(
+                            response, attempt_number=attempt_number
+                        )
+                        record_outbound_result_attributes(audio_bytes=len(audio_data))
                         return file_path
                     error_msg = resp_data.get("message", "未知错误")
-                    raise Exception(f"火山引擎 TTS API 返回错误: {error_msg}")
-                raise Exception(
+                    error = Exception(f"火山引擎 TTS API 返回错误: {error_msg}")
+                    recorder.record_failed(
+                        error,
+                        attempt_number=attempt_number,
+                        status_code=response.status,
+                    )
+                    raise error
+                error = Exception(
                     f"火山引擎 TTS API 请求失败: {response.status}, {response_text}",
                 )
+                recorder.record_failed(
+                    error,
+                    attempt_number=attempt_number,
+                    status_code=response.status,
+                )
+                raise error
 
         except Exception as e:
+            recorder.record_failed(e, attempt_number=attempt_number)
             error_details = traceback.format_exc()
             logger.debug(f"火山引擎 TTS 异常详情: {error_details}")
             raise Exception(f"火山引擎 TTS 异常: {e!s}")

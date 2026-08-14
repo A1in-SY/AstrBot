@@ -1,5 +1,11 @@
 import base64
 
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_result_attributes,
+    split_configured_endpoint,
+)
 from astrbot.core.utils.datetime_utils import generate_timestamp_id
 
 from ..entities import ProviderType
@@ -25,6 +31,8 @@ from .mimo_api_common import (
     provider_type=ProviderType.TEXT_TO_SPEECH,
 )
 class ProviderMiMoTTSAPI(TTSProvider):
+    _astrbot_deep_outbound = True
+
     def __init__(
         self,
         provider_config: dict,
@@ -101,19 +109,55 @@ class ProviderMiMoTTSAPI(TTSProvider):
         }
 
     async def get_audio(self, text: str) -> str:
-        response = await self.client.post(
-            build_api_url(self.api_base),
-            headers=build_headers(self.chosen_api_key),
-            json=self._build_payload(text),
+        payload = self._build_payload(text)
+        request_url = build_api_url(self.api_base)
+        route_base, route_path = split_configured_endpoint(
+            request_url,
+            dynamic_path_template="/chat/completions",
+            static_paths=("/chat/completions", "/v1/chat/completions"),
         )
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="mimo.chat.completions",
+                sdk_operation="httpx.AsyncClient.post",
+                base_url=route_base,
+                resource_path=route_path,
+                route_resolution="constructed",
+                timeout_seconds=self.timeout,
+                proxy_configured=bool(self.proxy),
+                parameters={
+                    **payload,
+                    "voice": self.voice,
+                    "audio_format": self.audio_format,
+                },
+            )
+        )
+        attempt_number = recorder.record_attempt()
+        try:
+            response = await self.client.post(
+                request_url,
+                headers=build_headers(self.chosen_api_key),
+                json=payload,
+            )
+        except BaseException as exc:
+            recorder.record_failed(exc, attempt_number=attempt_number)
+            raise
 
         try:
             response.raise_for_status()
         except Exception as exc:
             error_text = response.text[:1024]
-            raise MiMoAPIError(
+            error = MiMoAPIError(
                 f"MiMo TTS API request failed: HTTP {response.status_code}, response: {error_text}"
-            ) from exc
+            )
+            recorder.record_failed(
+                error,
+                attempt_number=attempt_number,
+                status_code=response.status_code,
+            )
+            raise error from exc
+
+        recorder.record_completed(response, attempt_number=attempt_number)
 
         data = response.json()
         choices = data.get("choices") or []
@@ -127,7 +171,9 @@ class ProviderMiMoTTSAPI(TTSProvider):
             get_temp_dir()
             / f"mimo_tts_api_{generate_timestamp_id()}.{self.audio_format}"
         )
-        output_path.write_bytes(base64.b64decode(audio_data))
+        audio_bytes = base64.b64decode(audio_data)
+        output_path.write_bytes(audio_bytes)
+        record_outbound_result_attributes(audio_bytes=len(audio_bytes))
         return str(output_path)
 
     async def terminate(self):

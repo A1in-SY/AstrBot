@@ -5,12 +5,18 @@ import re
 import secrets
 import time
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from xml.sax.saxutils import escape
 
 from httpx import AsyncClient, Timeout
 
 from astrbot import logger
 from astrbot.core.config.default import VERSION
+from astrbot.core.trace.outbound import (
+    OutboundCallRecorder,
+    OutboundRequestSnapshot,
+    record_outbound_recovery,
+)
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.datetime_utils import generate_timestamp_id
 
@@ -21,6 +27,18 @@ from ..register import register_provider_adapter
 TEMP_DIR = Path(get_astrbot_temp_path()) / "azure_tts"
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 AZURE_TTS_SUBSCRIPTION_KEY_PATTERN = r"^(?:[a-zA-Z0-9]{32}|[a-zA-Z0-9]{84})$"
+
+
+def _configured_route(url: str, resource_path: str) -> tuple[str | None, str]:
+    """Split a configured URL without exposing its potentially dynamic path."""
+
+    try:
+        parts = urlsplit(url)
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            return None, resource_path
+        return urlunsplit((parts.scheme, parts.netloc, "", "", "")), resource_path
+    except (TypeError, ValueError):
+        return None, resource_path
 
 
 class OTTSProvider:
@@ -57,6 +75,23 @@ class OTTSProvider:
             self._client = None
 
     async def _sync_time(self) -> None:
+        base_url, resource_path = _configured_route(
+            self.auth_time_url,
+            "/{configured_auth_time_path}",
+        )
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="azure.otts.time",
+                sdk_operation="httpx.AsyncClient.get",
+                http_method="GET",
+                base_url=base_url,
+                resource_path=resource_path,
+                route_resolution="constructed",
+                timeout_seconds=10,
+                proxy_configured=bool(self.proxy),
+            )
+        )
+        attempt_number = recorder.record_attempt()
         try:
             response = await self.client.get(self.auth_time_url)
             response.raise_for_status()
@@ -64,9 +99,16 @@ class OTTSProvider:
             local_time = int(time.time())
             self.time_offset = server_time - local_time
             self.last_sync_time = local_time
+            recorder.record_completed(response, attempt_number=attempt_number)
         except Exception as e:
             if time.time() - self.last_sync_time > 3600:
+                recorder.record_failed(e, attempt_number=attempt_number)
                 raise RuntimeError("时间同步失败") from e
+            record_outbound_recovery(
+                "use_cached_time_offset",
+                span=recorder.span,
+                attempt_number=attempt_number,
+            )
 
     async def _generate_signature(self) -> str:
         await self._sync_time()
@@ -80,18 +122,36 @@ class OTTSProvider:
     async def get_audio(self, text: str, voice_params: dict) -> str:
         file_path = TEMP_DIR / f"otts-{generate_timestamp_id()}.wav"
         signature = await self._generate_signature()
+        base_url, resource_path = _configured_route(
+            self.api_url,
+            "/{configured_tts_path}",
+        )
+        request_parameters = {
+            "text": text,
+            "voice": voice_params["voice"],
+            "style": voice_params["style"],
+            "role": voice_params["role"],
+            "rate": voice_params["rate"],
+            "volume": voice_params["volume"],
+        }
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="azure.otts.synthesis",
+                sdk_operation="httpx.AsyncClient.post",
+                base_url=base_url,
+                resource_path=resource_path,
+                route_resolution="constructed",
+                timeout_seconds=10,
+                proxy_configured=bool(self.proxy),
+                parameters=request_parameters,
+            )
+        )
         for attempt in range(self.retry_count):
+            attempt_number = recorder.record_attempt()
             try:
                 response = await self.client.post(
                     f"{self.api_url}?sign={signature}",
-                    data={
-                        "text": text,
-                        "voice": voice_params["voice"],
-                        "style": voice_params["style"],
-                        "role": voice_params["role"],
-                        "rate": voice_params["rate"],
-                        "volume": voice_params["volume"],
-                    },
+                    data=request_parameters,
                     headers={
                         "User-Agent": f"AstrBot/{VERSION}",
                         "UAK": "AstrBot/AzureTTS",
@@ -102,11 +162,20 @@ class OTTSProvider:
                 with file_path.open("wb") as f:
                     async for chunk in response.aiter_bytes(4096):
                         f.write(chunk)
+                recorder.record_completed(response, attempt_number=attempt_number)
                 return str(file_path.resolve())
             except Exception as e:
                 if attempt == self.retry_count - 1:
+                    recorder.record_failed(e, attempt_number=attempt_number)
                     raise RuntimeError(f"OTTS请求失败: {e!s}") from e
-                await asyncio.sleep(0.5 * (attempt + 1))
+                backoff_seconds = 0.5 * (attempt + 1)
+                recorder.record_retry(
+                    e,
+                    attempt_number=attempt_number,
+                    next_attempt_number=attempt_number + 1,
+                    backoff_seconds=backoff_seconds,
+                )
+                await asyncio.sleep(backoff_seconds)
         raise RuntimeError("OTTS未返回音频文件")
 
 
@@ -165,13 +234,33 @@ class AzureNativeProvider(TTSProvider):
         token_url = (
             f"https://{self.region}.api.cognitive.microsoft.com/sts/v1.0/issuetoken"
         )
-        response = await self.client.post(
+        base_url, resource_path = _configured_route(
             token_url,
-            headers={"Ocp-Apim-Subscription-Key": self.subscription_key},
+            "/sts/v1.0/issuetoken",
         )
-        response.raise_for_status()
-        self.token = response.text
-        self.token_expire = time.time() + 540
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="azure.speech.token",
+                sdk_operation="httpx.AsyncClient.post",
+                base_url=base_url,
+                resource_path=resource_path,
+                route_resolution="constructed",
+                proxy_configured=bool(self.proxy),
+            )
+        )
+        attempt_number = recorder.record_attempt()
+        try:
+            response = await self.client.post(
+                token_url,
+                headers={"Ocp-Apim-Subscription-Key": self.subscription_key},
+            )
+            response.raise_for_status()
+            self.token = response.text
+            self.token_expire = time.time() + 540
+            recorder.record_completed(response, attempt_number=attempt_number)
+        except BaseException as error:
+            recorder.record_failed(error, attempt_number=attempt_number)
+            raise
 
     async def get_audio(self, text: str) -> str:
         if not self.token or time.time() > self.token_expire:
@@ -189,20 +278,41 @@ class AzureNativeProvider(TTSProvider):
                 </mstts:express-as>
             </voice>
         </speak>"""
-        response = await self.client.post(
+        base_url, resource_path = _configured_route(
             self.endpoint,
-            content=ssml,
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "User-Agent": f"AstrBot/{VERSION}",
-            },
+            "/cognitiveservices/v1",
         )
-        response.raise_for_status()
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        with file_path.open("wb") as f:
-            for chunk in response.iter_bytes(4096):
-                f.write(chunk)
-        return str(file_path.resolve())
+        recorder = OutboundCallRecorder(
+            OutboundRequestSnapshot(
+                api_family="azure.speech.synthesis",
+                sdk_operation="httpx.AsyncClient.post",
+                base_url=base_url,
+                resource_path=resource_path,
+                route_resolution="constructed",
+                proxy_configured=bool(self.proxy),
+                parameters={"text": text, **self.voice_params},
+            )
+        )
+        attempt_number = recorder.record_attempt()
+        try:
+            response = await self.client.post(
+                self.endpoint,
+                content=ssml,
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "User-Agent": f"AstrBot/{VERSION}",
+                },
+            )
+            response.raise_for_status()
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            with file_path.open("wb") as f:
+                for chunk in response.iter_bytes(4096):
+                    f.write(chunk)
+            recorder.record_completed(response, attempt_number=attempt_number)
+            return str(file_path.resolve())
+        except BaseException as error:
+            recorder.record_failed(error, attempt_number=attempt_number)
+            raise
 
 
 @register_provider_adapter("azure_tts", "Azure TTS", ProviderType.TEXT_TO_SPEECH)
